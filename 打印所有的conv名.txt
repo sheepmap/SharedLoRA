@@ -1,0 +1,70 @@
+python -c "
+from models import DnCn
+import argparse
+args = argparse.Namespace(usmask_path='.', acceleration_factor='4x', device='cpu')
+model = DnCn(args, n_channels=1)
+for name, m in model.named_modules():
+    if hasattr(m, 'weight') and m.weight is not None and m.weight.dim() == 4:
+        print(f'  {name}')
+"
+根据打印结果，完整分析如下。
+
+Conv2d 层位置分析
+模型 D5C5 = 5 个级联块，每块 = 1个 restormer_layer + 1个 CSEUnetModel：
+
+conv_blocks 索引	类型
+0, 2, 4, 6, 8	restormer_layer（Transformer + DynamicHPF）
+1, 3, 5, 7, 9	CSEUnetModel（U-Net + DC）
+一、restormer_layer（偶数索引 conv_blocks）
+
+conv_blocks.{0,2,4,6,8}.conv.0                    输入投影 Conv2d(1→32, k=3)
+conv_blocks.{0,2,4,6,8}.conv.2.attn.kv             Transformer注意力 KV投影
+conv_blocks.{0,2,4,6,8}.conv.2.attn.kv_dwconv      注意力 depthwise conv
+conv_blocks.{0,2,4,6,8}.conv.2.attn.project_out     注意力输出投影
+conv_blocks.{0,2,4,6,8}.conv.2.dynHPF.conv          DynamicHPF 动态高通滤波
+conv_blocks.{0,2,4,6,8}.conv.2.ffn.project_in       FFN 输入投影
+conv_blocks.{0,2,4,6,8}.conv.2.ffn.dwconv           FFN depthwise conv
+conv_blocks.{0,2,4,6,8}.conv.2.ffn.project_out      FFN 输出投影
+conv_blocks.{0,2,4,6,8}.conv.3                     输出投影 Conv2d(32→1, k=3)
+二、CSEUnetModel（奇数索引 conv_blocks）
+编码器（下采样）
+
+conv_blocks.{1,3,5,7,9}.down_sample_layers.0.layers.0   第1层 Conv2d(1→32,   k=3)
+conv_blocks.{1,3,5,7,9}.down_sample_layers.0.layers.4   第1层 Conv2d(32→32,  k=3)
+conv_blocks.{1,3,5,7,9}.down_sample_layers.1.layers.0   第2层 Conv2d(32→64,  k=3)
+conv_blocks.{1,3,5,7,9}.down_sample_layers.1.layers.4   第2层 Conv2d(64→64,  k=3)
+conv_blocks.{1,3,5,7,9}.down_sample_layers.2.layers.0   第3层 Conv2d(64→128, k=3)
+conv_blocks.{1,3,5,7,9}.down_sample_layers.2.layers.4   第3层 Conv2d(128→128,k=3)
+瓶颈层
+
+conv_blocks.{1,3,5,7,9}.conv.layers.0                    Conv2d(128→128, k=3)
+conv_blocks.{1,3,5,7,9}.conv.layers.4                    Conv2d(128→128, k=3)
+conv_blocks.{1,3,5,7,9}.conv.attention_layer.fca.conv2   FCA 注意力 Conv2d
+解码器（上采样）
+
+conv_blocks.{1,3,5,7,9}.up_sample_layers.0.layers.0              第1层 Conv2d(256→64, k=3)
+conv_blocks.{1,3,5,7,9}.up_sample_layers.0.layers.4              第1层 Conv2d(64→64,  k=3)
+conv_blocks.{1,3,5,7,9}.up_sample_layers.0.attention_layer...    第1层 FCA 注意力
+conv_blocks.{1,3,5,7,9}.up_sample_layers.1.layers.0              第2层 Conv2d(128→32, k=3)
+conv_blocks.{1,3,5,7,9}.up_sample_layers.1.layers.4              第2层 Conv2d(32→32,  k=3)
+conv_blocks.{1,3,5,7,9}.up_sample_layers.1.attention_layer...    第2层 FCA 注意力
+conv_blocks.{1,3,5,7,9}.up_sample_layers.2.layers.0              第3层 Conv2d(64→32,  k=3)
+conv_blocks.{1,3,5,7,9}.up_sample_layers.2.layers.4              第3层 Conv2d(32→32,  k=3)
+conv_blocks.{1,3,5,7,9}.up_sample_layers.2.attention_layer...    第3层 FCA 注意力
+输出投影
+
+conv_blocks.{1,3,5,7,9}.conv2.0                    Conv2d(32→16, k=1)
+conv_blocks.{1,3,5,7,9}.conv2.1                    Conv2d(16→1,  k=1)
+conv_blocks.{1,3,5,7,9}.conv2.2                    Conv2d(1→1,   k=1)
+--melora_target 常用选项总结
+关键字	覆盖位置
+down_sample_layers	U-Net 编码器 3 层 ConvBlock（每 Cascade 6 个 Conv2d）
+up_sample_layers	U-Net 解码器 3 层 ConvBlock + 注意力（每 Cascade 6 个 Conv2d + 3 个 FCA）
+conv.layers	U-Net 瓶颈（每 Cascade 2 个 Conv2d）
+conv2	U-Net 输出 1x1 投影（每 Cascade 3 个 Conv2d）
+attention_layer	所有 FCA 注意力 Conv2d
+dynHPF.conv	DynamicHPF 动态高通滤波（每 Cascade 1 个）
+attn	Transformer 注意力内的 Conv2d（kv, kv_dwconv, project_out）
+ffn	Transformer FFN 内的 Conv2d（project_in, dwconv, project_out）
+conv_blocks	全部 Conv2d（restormer + U-Net）
+多关键字用逗号组合，如 --melora_target "down_sample_layers,up_sample_layers"。
