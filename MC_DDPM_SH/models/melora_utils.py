@@ -108,6 +108,12 @@ class MELoRAConv2d(nn.Module):
 
     def merge(self):
         """Merge LoRA weights into the original conv weight."""
+        # Grouped convolutions (e.g. depthwise) have weight shape [out, 1, kH, kW],
+        # which is incompatible with the LoRA delta shape. Skip merge for these;
+        # the forward pass still applies LoRA correctly.
+        if self.conv.groups > 1:
+            return
+
         if self.conv.weight.size(2) == 1 and self.conv.weight.size(3) == 1:
             # 1x1 conv
             for i, rank in enumerate(self.r):

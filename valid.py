@@ -70,7 +70,10 @@ def load_model(checkpoint_file, use_lora=False, lora_path=None):
         for m in model.modules():
             if hasattr(m, 'merge'):
                 m.merge()
-                m.disable_adapters = True
+                # Grouped convs skip merge (weight shape incompatible),
+                # so keep their LoRA adapters active in forward pass.
+                if m.conv.groups <= 1:
+                    m.disable_adapters = True
         print(f"MELoRA adapter loaded from {lora_path} and merged for inference")
     else:
         # Original inference (no LoRA)
