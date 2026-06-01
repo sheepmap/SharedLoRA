@@ -180,7 +180,7 @@ def _make_melora_dirname(args):
 
 def save_model(args, save_dir, epoch, model, optimizer, best_dev_loss, is_new_best):
     """Save LoRA adapter + training metadata to save_dir. No base weights (they don't change)."""
-    lora_state = {k: v for k, v in model.state_dict().items() if 'lora_' in k}
+    lora_state = {k: v for k, v in model.state_dict().items() if 'lora_' in k or 'step_sizes' in k}
 
     # Checkpoint: training metadata only, for resume
     torch.save(
@@ -208,7 +208,7 @@ def build_model_from_pretrained(args):
 
     # Create model and load base weights
     model = DnCn(args, n_channels=1).to(args.device)
-    model.load_state_dict(base_state, strict=True)
+    model.load_state_dict(base_state, strict=False)
 
     # Apply MELoRA
     melora_r = [int(x.strip()) for x in args.melora_r.split(",")]
@@ -259,7 +259,7 @@ def load_model(checkpoint_file):
     base_state = pretrained['model']
 
     model = DnCn(args, n_channels=1).to(args.device)
-    model.load_state_dict(base_state, strict=True)
+    model.load_state_dict(base_state, strict=False)
 
     # Apply MELoRA
     melora_r = [int(x.strip()) for x in args.melora_r.split(",")]

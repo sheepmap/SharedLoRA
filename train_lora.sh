@@ -20,7 +20,8 @@ USMASK_PATH=${BASE_PATH}'/usmasks/'
 MELORA_R="8,8"
 MELORA_ALPHA="16,16"
 MELORA_DROPOUT=0.05
-MELORA_TARGET="dynHPF.conv,attn.project_out,up_sample_layers"
+MELORA_TARGET="ffn.project_in,ffn.dwconv,up_sample_layers"
+#ffn.project_out
 
 echo python train_lora.py --pretrained-checkpoint ${PRETRAINED_CHECKPOINT} --batch-size ${BATCH_SIZE} --num-epochs ${NUM_EPOCHS} --lr ${LR} --lr-step-size ${LR_STEP_SIZE} --lr-gamma ${LR_GAMMA} --lr-eta-min ${LR_ETA_MIN} --device ${DEVICE} --exp-dir ${EXP_DIR} --train-path ${TRAIN_PATH} --validation-path ${VALIDATION_PATH} --dataset_type ${DATASET_TYPE} --usmask_path ${USMASK_PATH} --acceleration_factor ${ACC_FACTORS} --mask_type ${MASK_TYPE} --melora_r ${MELORA_R} --melora_alpha ${MELORA_ALPHA} --melora_dropout ${MELORA_DROPOUT} --melora_target ${MELORA_TARGET}
 

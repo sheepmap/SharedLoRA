@@ -317,17 +317,20 @@ class DnCn(nn.Module):
         self.conv_blocks = nn.ModuleList(conv_blocks)
         self.dcs = dcs
 
+        # 可学习步长：每个 cascade 两个（一个给 restormer_layer，一个给 CSEUnetModel）
+        self.step_sizes = nn.Parameter(torch.ones(nc, 2))
+
     def forward(self,x,k,m):
 
         for i in range(self.nc):
             x_dct = self.conv_blocks[2*i](x)
-            x_2 = x + x_dct
+            x_2 = x + self.step_sizes[i, 0] * x_dct
             x_2 = x_2.float()
             x_hpf = self.conv_blocks[(2*i)+1](x_2)
-            x = x_2 + x_hpf
+            x = x_2 + self.step_sizes[i, 1] * x_hpf
             #x = self.dcs[i](x,k)
-            x = self.dcs[i](x,k,m)        
- 
+            x = self.dcs[i](x,k,m)
+
         return x
 
 
