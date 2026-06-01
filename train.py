@@ -252,7 +252,10 @@ def main(args):
     #print("after create data loader")
     #print (len(display1_loader),len(display2_loader))
     #print ("Dataloader initialized")
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_step_size, args.lr_gamma)
+    # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_step_size, args.lr_gamma)
+    # 注释原因：StepLR 在短训练（如10 epoch）中衰减次数过少（lr_step_size=40 时整个训练期间学习率不变），
+    # 改为 CosineAnnealingLR 使学习率在整个训练周期内平滑下降，更适合短周期训练。
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=args.lr_eta_min)
     
     for epoch in range(start_epoch, args.num_epochs):
 
@@ -285,6 +288,8 @@ def create_arg_parser():
                         help='Period of learning rate decay')
     parser.add_argument('--lr-gamma', type=float, default=0.1,
                         help='Multiplicative factor of learning rate decay')
+    parser.add_argument('--lr-eta-min', type=float, default=1e-7,
+                        help='Minimum learning rate for cosine annealing')
     parser.add_argument('--weight-decay', type=float, default=0.,
                         help='Strength of weight decay regularization')
     parser.add_argument('--report-interval', type=int, default=100, help='Period of loss reporting')
