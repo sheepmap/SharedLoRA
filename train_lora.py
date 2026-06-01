@@ -319,10 +319,10 @@ def main(args):
 
     for epoch in range(start_epoch, args.num_epochs):
 
-        scheduler.step(epoch)
         train_loss,train_time = train_epoch(args, epoch, model, train_loader,optimizer,writer)
         dev_loss,dev_time = evaluate(args, epoch, model, dev_loader, writer)
         visualize(args, epoch, model, display1_loader, writer,'t1')
+        scheduler.step()
 
         is_new_best = dev_loss < best_dev_loss
         best_dev_loss = min(best_dev_loss,dev_loss)
