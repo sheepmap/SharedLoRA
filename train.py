@@ -207,7 +207,7 @@ def load_model(checkpoint_file):
     if args.data_parallel:
         model = torch.nn.DataParallel(model)
 
-    model.load_state_dict(checkpoint['model'])
+    model.load_state_dict(checkpoint['model'], strict=False)
 
     optimizer = build_optim(args, model.parameters())
     optimizer.load_state_dict(checkpoint['optimizer'])
@@ -227,13 +227,10 @@ def main(args):
 
     if args.resume:
         print('resuming model, batch_size', args.batch_size)
-        #checkpoint, model, optimizer, disc, optimizerD = load_model(args, args.checkpoint)
-        checkpoint, model, optimizer, disc, optimizerD = load_model(args.checkpoint)
+        checkpoint, model, optimizer = load_model(args.checkpoint)
         args = checkpoint['args']
-        args.batch_size = 28
-        best_dev_mse= checkpoint['best_dev_mse']
-        best_dev_ssim = checkpoint['best_dev_mse']
-        start_epoch = checkpoint['epoch']
+        best_dev_loss = checkpoint['best_dev_loss']
+        start_epoch = checkpoint['epoch'] + 1
         del checkpoint
     else:
         model = build_model(args)
