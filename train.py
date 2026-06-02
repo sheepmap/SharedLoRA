@@ -238,6 +238,13 @@ def main(args):
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=args.lr_eta_min)
         if 'scheduler' in checkpoint:
             scheduler.load_state_dict(checkpoint['scheduler'])
+        else:
+            # 旧 checkpoint 没有 scheduler 状态，手动追赶进度
+            saved_lr = optimizer.param_groups[0]['lr']
+            for _ in range(start_epoch):
+                scheduler.step()
+            # 恢复 optimizer 中的 lr（scheduler.step 会覆盖它）
+            optimizer.param_groups[0]['lr'] = saved_lr
         del checkpoint
     else:
         model = build_model(args)
