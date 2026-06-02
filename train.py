@@ -176,7 +176,7 @@ def visualize(args, epoch, model, data_loader, writer,datasettype_string):
             save_image(torch.abs(target.float() - output.float()), 'Error_{}'.format(datasettype_string))
             break
 
-def save_model(args, exp_dir, epoch, model, optimizer,best_dev_loss,is_new_best):
+def save_model(args, exp_dir, epoch, model, optimizer, scheduler, best_dev_loss,is_new_best):
 
     out = torch.save(
         {
@@ -184,6 +184,7 @@ def save_model(args, exp_dir, epoch, model, optimizer,best_dev_loss,is_new_best)
             'args': args,
             'model': model.state_dict(),
             'optimizer': optimizer.state_dict(),
+            'scheduler': scheduler.state_dict(),
             'best_dev_loss': best_dev_loss,
             'exp_dir':exp_dir
         },
@@ -231,14 +232,24 @@ def main(args):
         args = checkpoint['args']
         best_dev_loss = checkpoint['best_dev_loss']
         start_epoch = checkpoint['epoch'] + 1
+        # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_step_size, args.lr_gamma)
+        # 注释原因：StepLR 在短训练（如10 epoch）中衰减次数过少（lr_step_size=40 时整个训练期间学习率不变），
+        # 改为 CosineAnnealingLR 使学习率在整个训练周期内平滑下降，更适合短周期训练。
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=args.lr_eta_min)
+        if 'scheduler' in checkpoint:
+            scheduler.load_state_dict(checkpoint['scheduler'])
         del checkpoint
     else:
         model = build_model(args)
         #print ("Model Built")
         if args.data_parallel:
-            model = torch.nn.DataParallel(model)    
+            model = torch.nn.DataParallel(model)
         optimizer = build_optim(args, model.parameters())
         #print ("Optmizer initialized")
+        # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_step_size, args.lr_gamma)
+        # 注释原因：StepLR 在短训练（如10 epoch）中衰减次数过少（lr_step_size=40 时整个训练期间学习率不变），
+        # 改为 CosineAnnealingLR 使学习率在整个训练周期内平滑下降，更适合短周期训练。
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=args.lr_eta_min)
         best_dev_loss = 1e9
         start_epoch = 0
 
@@ -249,10 +260,6 @@ def main(args):
     #print("after create data loader")
     #print (len(display1_loader),len(display2_loader))
     #print ("Dataloader initialized")
-    # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_step_size, args.lr_gamma)
-    # 注释原因：StepLR 在短训练（如10 epoch）中衰减次数过少（lr_step_size=40 时整个训练期间学习率不变），
-    # 改为 CosineAnnealingLR 使学习率在整个训练周期内平滑下降，更适合短周期训练。
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=args.lr_eta_min)
     
     for epoch in range(start_epoch, args.num_epochs):
 
@@ -263,7 +270,7 @@ def main(args):
 
         is_new_best = dev_loss < best_dev_loss
         best_dev_loss = min(best_dev_loss,dev_loss)
-        save_model(args, args.exp_dir, epoch, model, optimizer,best_dev_loss,is_new_best)
+        save_model(args, args.exp_dir, epoch, model, optimizer, scheduler, best_dev_loss,is_new_best)
         logging.info(
             f'Epoch = [{epoch:4d}/{args.num_epochs:4d}] TrainLoss = {train_loss:.4g}'
             f'DevLoss= {dev_loss:.4g} TrainTime = {train_time:.4f}s DevTime = {dev_time:.4f}s',
