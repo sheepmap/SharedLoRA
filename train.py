@@ -240,11 +240,10 @@ def main(args):
             scheduler.load_state_dict(checkpoint['scheduler'])
         else:
             # 旧 checkpoint 没有 scheduler 状态，手动追赶进度
-            saved_lr = optimizer.param_groups[0]['lr']
+            # 用命令行传入的 lr 覆盖 checkpoint 中的 lr
             for _ in range(start_epoch):
                 scheduler.step()
-            # 恢复 optimizer 中的 lr（scheduler.step 会覆盖它）
-            optimizer.param_groups[0]['lr'] = saved_lr
+            optimizer.param_groups[0]['lr'] = args.lr
         del checkpoint
     else:
         model = build_model(args)
