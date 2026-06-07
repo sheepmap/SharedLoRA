@@ -79,7 +79,7 @@ def load_model(checkpoint_file, use_lora=False, lora_path=None):
         # Original inference (no LoRA)
         if args.data_parallel:
             model = torch.nn.DataParallel(model)
-        model.load_state_dict(checkpoint['model'], strict=False)
+        model.load_state_dict(checkpoint['model'])
 
     return model
 

@@ -262,7 +262,7 @@ def set_melora_trainable(model: nn.Module) -> int:
     """
     trainable_count = 0
     for name, param in model.named_parameters():
-        if "lora_" in name or "step_sizes" in name:
+        if "lora_" in name:
             param.requires_grad = True
             trainable_count += param.numel()
         else:
@@ -272,4 +272,4 @@ def set_melora_trainable(model: nn.Module) -> int:
 
 def get_melora_state_dict(model: nn.Module) -> dict:
     """Return state dict containing only MELoRA parameters."""
-    return {k: v for k, v in model.state_dict().items() if "lora_" in k or "step_sizes" in k}
+    return {k: v for k, v in model.state_dict().items() if "lora_" in k}
