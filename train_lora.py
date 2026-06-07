@@ -172,7 +172,7 @@ def train_epoch(args, epoch, model, data_loader, optimizer, writer,
             target, acc_idx, mask_idx, ds_idx, mask_bank,
             acc_factors, mask_types, dataset_types)
 
-        us_input_high = us_input_high.float()
+        us_input_high = us_input_high.squeeze(1).float()  # [B, 1, 1, H, W] -> [B, 1, H, W]
         target = target.float()
 
         # --- 训练分支前向传播（带LoRA） ---
@@ -188,7 +188,7 @@ def train_epoch(args, epoch, model, data_loader, optimizer, writer,
                 target, ref_acc_idx, mask_idx, ds_idx, mask_bank_ref,
                 args.ref_acceleration_factor.split(','),
                 mask_types, dataset_types)
-            us_input_ref = us_input_ref.float()
+            us_input_ref = us_input_ref.squeeze(1).float()  # [B, 1, 1, H, W] -> [B, 1, H, W]
 
             # 参考分支前向传播（冻结，无梯度）
             with torch.no_grad():
@@ -330,7 +330,7 @@ def build_model_from_pretrained(args):
 
     # Create model and load base weights
     model = DnCn(args, n_channels=1).to(args.device)
-    model.load_state_dict(base_state, strict=True)
+    model.load_state_dict(base_state, strict=False)
 
     # Apply MELoRA
     melora_r = [int(x.strip()) for x in args.melora_r.split(",")]
@@ -403,7 +403,7 @@ def load_model(checkpoint_file):
     base_state = pretrained['model']
 
     model = DnCn(args, n_channels=1).to(args.device)
-    model.load_state_dict(base_state, strict=True)
+    model.load_state_dict(base_state, strict=False)
 
     # Apply MELoRA
     melora_r = [int(x.strip()) for x in args.melora_r.split(",")]
