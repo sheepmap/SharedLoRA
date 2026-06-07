@@ -98,7 +98,64 @@ def gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, m
     return us_img.unsqueeze(1), torch.view_as_real(us_kspace), mask
 
 
-def train_epoch(args, epoch, model,data_loader, optimizer, writer, mask_bank, acc_factors, mask_types, dataset_types):
+def cosine_similarity_loss(feat_a, feat_b):
+    """计算两个特征图的余弦相似度损失。输入形状 [B, C, H, W]，返回标量。"""
+    B = feat_a.shape[0]
+    fa = feat_a.reshape(B, -1)  # 展平 C*H*W
+    fb = feat_b.reshape(B, -1)
+    cos_sim = F.cosine_similarity(fa, fb, dim=1)  # [B]
+    return (1 - cos_sim).mean()
+
+
+def extract_unet_features(model_dncn, x, k, m, cascade_idx=-1, layer_indices=(1, 2)):
+    """
+    运行 DnCn 前向传播，提取指定级联块的 CSEUnetModel 中间特征。
+
+    Args:
+        model_dncn: DnCn 模型实例
+        x: 输入图像 [B, 1, H, W]
+        k: 欠采样 k-space
+        m: 欠采样 mask
+        cascade_idx: 提取哪个级联块的特征，-1 表示最后一个
+        layer_indices: 提取 up_sample_layers 的哪些层，默认 (1, 2) = 第5、6层（接近输出）
+
+    Returns:
+        output: 模型最终输出
+        features: dict {layer_index: feature_tensor [B, C, H, W]}
+    """
+    features = {}
+
+    # 处理 DataParallel 包装
+    inner_model = model_dncn.module if hasattr(model_dncn, 'module') else model_dncn
+
+    if cascade_idx == -1:
+        cascade_idx = inner_model.nc - 1
+    unet_block_idx = 2 * cascade_idx + 1  # CSEUnetModel 在 conv_blocks 中的索引
+
+    unet_model = inner_model.conv_blocks[unet_block_idx]
+
+    # 注册 hook
+    hooks = []
+    for li in layer_indices:
+        def make_hook(layer_id):
+            def hook_fn(module, inp, out):
+                features[layer_id] = out
+            return hook_fn
+        h = unet_model.up_sample_layers[li].register_forward_hook(make_hook(li))
+        hooks.append(h)
+
+    output = model_dncn(x, k, m)
+
+    # 移除 hook
+    for h in hooks:
+        h.remove()
+
+    return output, features
+
+
+def train_epoch(args, epoch, model, data_loader, optimizer, writer,
+                mask_bank, acc_factors, mask_types, dataset_types,
+                ref_model=None, mask_bank_ref=None):
 
     model.train()
     avg_loss = 0.
@@ -109,19 +166,59 @@ def train_epoch(args, epoch, model,data_loader, optimizer, writer, mask_bank, ac
 
         target, acc_idx, mask_idx, ds_idx = data
         target = target.unsqueeze(1).to(args.device)
-        us_input, input_kspace, mask = gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, mask_types, dataset_types)
 
-        us_input = us_input.float()
+        # 高倍欠采样输入（训练分支）
+        us_input_high, input_kspace_high, mask_high = gpu_undersample(
+            target, acc_idx, mask_idx, ds_idx, mask_bank,
+            acc_factors, mask_types, dataset_types)
+
+        us_input_high = us_input_high.float()
         target = target.float()
-        output = model(us_input,input_kspace,mask)
 
-        loss = F.l1_loss(output,target)
+        # --- 训练分支前向传播（带LoRA） ---
+        if ref_model is not None and mask_bank_ref is not None and args.feat_loss_alpha > 0:
+            # 提取训练分支特征
+            output, features_train = extract_unet_features(
+                model, us_input_high, input_kspace_high, mask_high,
+                cascade_idx=-1, layer_indices=(1, 2))
+
+            # 生成低倍欠采样输入（参考分支）
+            ref_acc_idx = [0] * target.shape[0]
+            us_input_ref, input_kspace_ref, mask_ref = gpu_undersample(
+                target, ref_acc_idx, mask_idx, ds_idx, mask_bank_ref,
+                args.ref_acceleration_factor.split(','),
+                mask_types, dataset_types)
+            us_input_ref = us_input_ref.float()
+
+            # 参考分支前向传播（冻结，无梯度）
+            with torch.no_grad():
+                _, features_ref = extract_unet_features(
+                    ref_model, us_input_ref, input_kspace_ref, mask_ref,
+                    cascade_idx=-1, layer_indices=(1, 2))
+
+            # 计算复合损失
+            loss_img = F.l1_loss(output, target)
+            loss_feat = (
+                cosine_similarity_loss(features_train[1], features_ref[1]) +
+                cosine_similarity_loss(features_train[2], features_ref[2])
+            )
+            loss = loss_img + args.feat_loss_alpha * loss_feat
+
+            if iter % args.report_interval == 0:
+                logging.info(
+                    f'  L_img={loss_img.item():.4g} L_feat={loss_feat.item():.4g} '
+                    f'alpha*L_feat={args.feat_loss_alpha * loss_feat.item():.4g}')
+        else:
+            # 原始训练路径（无特征损失）
+            output = model(us_input_high, input_kspace_high, mask_high)
+            loss = F.l1_loss(output, target)
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
         avg_loss = 0.99 * avg_loss + 0.01 * loss.item() if iter > 0 else loss.item()
-        writer.add_scalar('TrainLoss',loss.item(),global_step + iter )
+        writer.add_scalar('TrainLoss', loss.item(), global_step + iter)
 
         if iter % args.report_interval == 0:
             logging.info(
@@ -274,6 +371,28 @@ def build_model_from_pretrained(args):
     return model
 
 
+def build_ref_model(args):
+    """构建冻结的参考模型（无LoRA），用于提取特征计算损失。
+
+    注意：使用与训练模型相同的预训练权重（在低倍欠采样数据上训练得到）。
+    该权重与低倍欠采样数据是配套的。
+    """
+    pretrained = torch.load(args.pretrained_checkpoint)
+    base_state = pretrained['model']
+
+    ref_model = DnCn(args, n_channels=1).to(args.device)
+    ref_model.load_state_dict(base_state, strict=True)
+    ref_model.eval()
+
+    # 冻结全部参数，仅用于特征提取
+    for param in ref_model.parameters():
+        param.requires_grad = False
+
+    logger.info("Reference model built from pretrained weights (frozen, no LoRA)")
+    logger.info("  Note: This uses the same pretrained checkpoint as the train model")
+    return ref_model
+
+
 def load_model(checkpoint_file):
     """Resume from a LoRA checkpoint.pt (metadata only, no model weights)."""
     checkpoint = torch.load(checkpoint_file)
@@ -347,9 +466,21 @@ def main(args):
     dataset_types = args.dataset_type.split(',')
     mask_bank = build_mask_bank(acc_factors, mask_types, dataset_types, args.usmask_path, args.device)
 
+    # 构建参考模型用于特征损失
+    ref_model = None
+    mask_bank_ref = None
+    if args.feat_loss_alpha > 0:
+        ref_model = build_ref_model(args)
+        ref_acc_factors = args.ref_acceleration_factor.split(',')
+        mask_bank_ref = build_mask_bank(ref_acc_factors, mask_types, dataset_types,
+                                        args.usmask_path, args.device)
+
     for epoch in range(start_epoch, args.num_epochs):
 
-        train_loss,train_time = train_epoch(args, epoch, model, train_loader,optimizer,writer, mask_bank, acc_factors, mask_types, dataset_types)
+        train_loss, train_time = train_epoch(
+            args, epoch, model, train_loader, optimizer, writer,
+            mask_bank, acc_factors, mask_types, dataset_types,
+            ref_model=ref_model, mask_bank_ref=mask_bank_ref)
         dev_loss,dev_time = evaluate(args, epoch, model, dev_loader, writer, mask_bank, acc_factors, mask_types, dataset_types)
         visualize(args, epoch, model, display1_loader, writer,'t1', mask_bank, acc_factors, mask_types, dataset_types)
         scheduler.step()
@@ -413,6 +544,12 @@ def create_arg_parser():
                         help='dropout rate for MELoRA paths')
     parser.add_argument('--melora_target', type=str, default='',
                         help='comma-separated name substrings to target (e.g. "down_sample_layers")')
+
+    # Feature loss settings
+    parser.add_argument('--feat-loss-alpha', type=float, default=0.1,
+                        help='Weight for feature-domain cosine similarity loss (0 to disable)')
+    parser.add_argument('--ref-acceleration-factor', type=str, default='4x',
+                        help='Acceleration factor for the reference branch (低倍, e.g., 4x)')
 
     return parser
 

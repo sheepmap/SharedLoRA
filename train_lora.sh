@@ -20,10 +20,14 @@ USMASK_PATH=${BASE_PATH}'/usmasks/'
 MELORA_R="8,8"
 MELORA_ALPHA="16,16"
 MELORA_DROPOUT=0.05
-MELORA_TARGET="ffn.project_in,ffn.dwconv,up_sample_layers"
-#ffn.project_out
+MELORA_TARGET="up_sample_layers"
+#ffn.project_out,ffn.project_in,ffn.dwconv,
 
-echo python train_lora.py --pretrained-checkpoint ${PRETRAINED_CHECKPOINT} --batch-size ${BATCH_SIZE} --num-epochs ${NUM_EPOCHS} --lr ${LR} --lr-step-size ${LR_STEP_SIZE} --lr-gamma ${LR_GAMMA} --lr-eta-min ${LR_ETA_MIN} --device ${DEVICE} --exp-dir ${EXP_DIR} --train-path ${TRAIN_PATH} --validation-path ${VALIDATION_PATH} --dataset_type ${DATASET_TYPE} --usmask_path ${USMASK_PATH} --acceleration_factor ${ACC_FACTORS} --mask_type ${MASK_TYPE} --melora_r ${MELORA_R} --melora_alpha ${MELORA_ALPHA} --melora_dropout ${MELORA_DROPOUT} --melora_target ${MELORA_TARGET}
+# Feature loss settings
+FEAT_LOSS_ALPHA=0.1          # 特征损失权重，设为 0 禁用
+REF_ACC_FACTOR='4x'          # 参考分支的低倍欠采样倍数
+
+echo python train_lora.py --pretrained-checkpoint ${PRETRAINED_CHECKPOINT} --batch-size ${BATCH_SIZE} --num-epochs ${NUM_EPOCHS} --lr ${LR} --lr-step-size ${LR_STEP_SIZE} --lr-gamma ${LR_GAMMA} --lr-eta-min ${LR_ETA_MIN} --device ${DEVICE} --exp-dir ${EXP_DIR} --train-path ${TRAIN_PATH} --validation-path ${VALIDATION_PATH} --dataset_type ${DATASET_TYPE} --usmask_path ${USMASK_PATH} --acceleration_factor ${ACC_FACTORS} --mask_type ${MASK_TYPE} --melora_r ${MELORA_R} --melora_alpha ${MELORA_ALPHA} --melora_dropout ${MELORA_DROPOUT} --melora_target ${MELORA_TARGET} --feat-loss-alpha ${FEAT_LOSS_ALPHA} --ref-acceleration-factor ${REF_ACC_FACTOR}
 
 python train_lora.py \
     --pretrained-checkpoint ${PRETRAINED_CHECKPOINT} \
@@ -44,4 +48,6 @@ python train_lora.py \
     --melora_r ${MELORA_R} \
     --melora_alpha ${MELORA_ALPHA} \
     --melora_dropout ${MELORA_DROPOUT} \
-    --melora_target ${MELORA_TARGET}
+    --melora_target ${MELORA_TARGET} \
+    --feat-loss-alpha ${FEAT_LOSS_ALPHA} \
+    --ref-acceleration-factor ${REF_ACC_FACTOR}
