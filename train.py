@@ -73,7 +73,32 @@ def create_data_loaders(args):
     return train_loader, dev_loader, display_loader1
 
 
-def train_epoch(args, epoch, model,data_loader, optimizer, writer):
+def build_mask_bank(acc_factors, mask_types, dataset_types, usmask_path, device):
+    """Load pre-generated fixed masks from .npy files onto GPU."""
+    mask_bank = {}
+    for ds in dataset_types:
+        for mt in mask_types:
+            for af in acc_factors:
+                path = os.path.join(usmask_path, ds, mt, f'mask_{af}.npy')
+                mask_bank[(ds, mt, af)] = torch.from_numpy(np.load(path)).to(device)
+    return mask_bank
+
+
+def gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, mask_types, dataset_types):
+    """Perform FFT, masking, and IFFT on GPU using pre-loaded fixed masks."""
+    B = target.shape[0]
+    masks = []
+    for i in range(B):
+        key = (dataset_types[ds_idx[i]], mask_types[mask_idx[i]], acc_factors[acc_idx[i]])
+        masks.append(mask_bank[key])
+    mask = torch.stack(masks)                                          # (B, H, W)
+    kspace = torch.fft.fft2(target, norm='ortho')                     # GPU FFT
+    us_kspace = kspace * mask.unsqueeze(1)
+    us_img = torch.abs(torch.fft.ifft2(us_kspace, norm='ortho'))      # GPU IFFT
+    return us_img.unsqueeze(1), torch.view_as_real(us_kspace), mask
+
+
+def train_epoch(args, epoch, model,data_loader, optimizer, writer, mask_bank, acc_factors, mask_types, dataset_types):
     
     model.train()
     avg_loss = 0.
@@ -83,13 +108,9 @@ def train_epoch(args, epoch, model,data_loader, optimizer, writer):
 
     for iter, data in enumerate(tqdm(data_loader)):
 
-        us_input, input_kspace, target,mask = data
-       
-        us_input = us_input.unsqueeze(1).to(args.device)
-        input_kspace = input_kspace.to(args.device)
+        target, acc_idx, mask_idx, ds_idx = data
         target = target.unsqueeze(1).to(args.device)
-        mask = mask.to(args.device)
-
+        us_input, input_kspace, mask = gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, mask_types, dataset_types)
 
         us_input = us_input.float()
         target = target.float()
@@ -117,22 +138,19 @@ def train_epoch(args, epoch, model,data_loader, optimizer, writer):
     return avg_loss, time.perf_counter() - start_epoch
 
 
-def evaluate(args, epoch, model, data_loader, writer):
+def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, mask_types, dataset_types):
 
     model.eval()
     losses = []
     start = time.perf_counter()
-    
+
     with torch.no_grad():
         for iter, data in enumerate(tqdm(data_loader)):
-    
-            us_input, input_kspace, target,mask = data
 
-            us_input = us_input.unsqueeze(1).to(args.device)
-            input_kspace = input_kspace.to(args.device)
+            target, acc_idx, mask_idx, ds_idx = data
             target = target.unsqueeze(1).to(args.device)
-            mask = mask.to(args.device)
-    
+            us_input, input_kspace, mask = gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, mask_types, dataset_types)
+
             us_input = us_input.float()
             target = target.float()
     
@@ -148,9 +166,9 @@ def evaluate(args, epoch, model, data_loader, writer):
     return np.mean(losses), time.perf_counter() - start
 
 
-def visualize(args, epoch, model, data_loader, writer,datasettype_string):
+def visualize(args, epoch, model, data_loader, writer, datasettype_string, mask_bank=None, acc_factors=None, mask_types=None, dataset_types=None):
 
-    
+
     def save_image(image, tag):
         image -= image.min()
         image /= image.max()
@@ -160,11 +178,18 @@ def visualize(args, epoch, model, data_loader, writer,datasettype_string):
     model.eval()
     with torch.no_grad():
         for iter, data in enumerate(tqdm(data_loader)):
-            us_input, input_kspace, target, mask = data
-            us_input = us_input.unsqueeze(1).to(args.device)
-            input_kspace = input_kspace.to(args.device)
-            target = target.unsqueeze(1).to(args.device)
-            mask = mask.to(args.device)
+            if mask_bank is not None:
+                # SliceData returns (target, acc_idx, mask_idx, ds_idx)
+                target, acc_idx, mask_idx, ds_idx = data
+                target = target.unsqueeze(1).to(args.device)
+                us_input, input_kspace, mask = gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, mask_types, dataset_types)
+            else:
+                # SliceDisplayDataDev returns (input_img, input_kspace, target, mask)
+                us_input, input_kspace, target, mask = data
+                us_input = us_input.unsqueeze(1).to(args.device)
+                input_kspace = input_kspace.to(args.device)
+                target = target.unsqueeze(1).to(args.device)
+                mask = mask.to(args.device)
 
             us_input = us_input.float()
             target = target.float()
@@ -261,17 +286,18 @@ def main(args):
 
     logging.info(args)
     logging.info(model)
-    #print("b4 create data loader")
     train_loader, dev_loader, display1_loader = create_data_loaders(args)
-    #print("after create data loader")
-    #print (len(display1_loader),len(display2_loader))
-    #print ("Dataloader initialized")
-    
+
+    acc_factors = args.acceleration_factor.split(',')
+    mask_types = args.mask_type.split(',')
+    dataset_types = args.dataset_type.split(',')
+    mask_bank = build_mask_bank(acc_factors, mask_types, dataset_types, args.usmask_path, args.device)
+
     for epoch in range(start_epoch, args.num_epochs):
 
-        train_loss,train_time = train_epoch(args, epoch, model, train_loader,optimizer,writer)
-        dev_loss,dev_time = evaluate(args, epoch, model, dev_loader, writer)
-        visualize(args, epoch, model, display1_loader, writer,'t1')
+        train_loss,train_time = train_epoch(args, epoch, model, train_loader,optimizer,writer, mask_bank, acc_factors, mask_types, dataset_types)
+        dev_loss,dev_time = evaluate(args, epoch, model, dev_loader, writer, mask_bank, acc_factors, mask_types, dataset_types)
+        visualize(args, epoch, model, display1_loader, writer,'t1', mask_bank, acc_factors, mask_types, dataset_types)
         scheduler.step()
 
         is_new_best = dev_loss < best_dev_loss

@@ -16,7 +16,10 @@ class SliceData(Dataset):
     def __init__(self, root, acc_factors,dataset_types,mask_types,train_or_valid,mask_path): # acc_factor can be passed here and saved as self variable
         #files = list(pathlib.Path(root).iterdir())
         self.examples = []
-        self.mask_path = mask_path 
+        self.mask_path = mask_path
+        self.acc_factors = acc_factors
+        self.mask_types = mask_types
+        self.dataset_types = dataset_types
         for dataset_type in dataset_types:
             dataroot = os.path.join(root, dataset_type)
             for mask_type in mask_types:
@@ -37,17 +40,16 @@ class SliceData(Dataset):
 
     def __getitem__(self, i):
         # Index the fname and slice using the list created in __init__
-        
-        fname, slice,acc_factor,mask_type, dataset_type = self.examples[i] 
-    
-        with h5py.File(fname, 'r') as data:
-            target = data['volfs'][:,:,slice].astype(np.float64)# converting to double
-            
-            acc_val = float(acc_factor[:-1].replace("_","."))
-            input_img, mask,input_kspace =CreateZeroFilledImageFn(target,acc_val,mask_type) 
-            input_kspace = npComplexToTorch(input_kspace)
 
-            return torch.from_numpy(input_img), input_kspace, torch.from_numpy(target),torch.from_numpy(mask)
+        fname, slice, acc_factor, mask_type, dataset_type = self.examples[i]
+
+        with h5py.File(fname, 'r') as data:
+            target = data['volfs'][:,:,slice].astype(np.float64)
+
+        acc_idx = self.acc_factors.index(acc_factor)
+        mask_idx = self.mask_types.index(mask_type)
+        ds_idx = self.dataset_types.index(dataset_type)
+        return torch.from_numpy(target), acc_idx, mask_idx, ds_idx
 
             
 class SliceDataDev(Dataset):
