@@ -505,7 +505,7 @@ def main(args):
             mask_bank, acc_factors, mask_types, dataset_types,
             ref_model=ref_model, mask_bank_ref=mask_bank_ref)
         dev_loss,dev_time = evaluate(args, epoch, model, dev_loader, writer, mask_bank, acc_factors, mask_types, dataset_types)
-        visualize(args, epoch, model, display1_loader, writer,'t1', mask_bank, acc_factors, mask_types, dataset_types)
+        visualize(args, epoch, model, display1_loader, writer, 't1')
         scheduler.step()
 
         is_new_best = dev_loss < best_dev_loss
