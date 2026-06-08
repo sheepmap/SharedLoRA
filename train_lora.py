@@ -89,7 +89,10 @@ def gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, m
     B = target.shape[0]
     masks = []
     for i in range(B):
-        key = (dataset_types[ds_idx[i].item()], mask_types[mask_idx[i].item()], acc_factors[acc_idx[i].item()])
+        di = ds_idx[i].item() if hasattr(ds_idx[i], 'item') else ds_idx[i]
+        mi = mask_idx[i].item() if hasattr(mask_idx[i], 'item') else mask_idx[i]
+        ai = acc_idx[i].item() if hasattr(acc_idx[i], 'item') else acc_idx[i]
+        key = (dataset_types[di], mask_types[mi], acc_factors[ai])
         masks.append(mask_bank[key])
     mask = torch.stack(masks)                                          # (B, H, W)
     kspace = torch.fft.fft2(target, norm='ortho')                     # GPU FFT
