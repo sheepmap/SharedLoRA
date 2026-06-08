@@ -162,6 +162,8 @@ def train_epoch(args, epoch, model, data_loader, optimizer, writer,
 
     model.train()
     avg_loss = 0.
+    avg_loss_img = 0.
+    avg_loss_feat = 0.
     start_epoch = start_iter = time.perf_counter()
     global_step = epoch * len(data_loader)
 
@@ -225,13 +227,26 @@ def train_epoch(args, epoch, model, data_loader, optimizer, writer,
         avg_loss = 0.99 * avg_loss + 0.01 * loss.item() if iter > 0 else loss.item()
         writer.add_scalar('TrainLoss', loss.item(), global_step + iter)
 
+        if ref_model is not None and args.feat_loss_alpha > 0:
+            avg_loss_img = 0.99 * avg_loss_img + 0.01 * loss_img.item() if iter > 0 else loss_img.item()
+            avg_loss_feat = 0.99 * avg_loss_feat + 0.01 * loss_feat.item() if iter > 0 else loss_feat.item()
+
         if iter % args.report_interval == 0:
-            logging.info(
-                f'Epoch = [{epoch:3d}/{args.num_epochs:3d}] '
-                f'Iter = [{iter:4d}/{len(data_loader):4d}] '
-                f'Loss = {loss.item():.4g} Avg Loss = {avg_loss:.4g} '
-                f'Time = {time.perf_counter() - start_iter:.4f}s',
-            )
+            if ref_model is not None and args.feat_loss_alpha > 0:
+                logging.info(
+                    f'Epoch = [{epoch:3d}/{args.num_epochs:3d}] '
+                    f'Iter = [{iter:4d}/{len(data_loader):4d}] '
+                    f'Loss = {loss.item():.4g} Avg Loss = {avg_loss:.4g} '
+                    f'Avg L_img = {avg_loss_img:.4g} Avg L_feat = {avg_loss_feat:.4g} '
+                    f'Time = {time.perf_counter() - start_iter:.4f}s',
+                )
+            else:
+                logging.info(
+                    f'Epoch = [{epoch:3d}/{args.num_epochs:3d}] '
+                    f'Iter = [{iter:4d}/{len(data_loader):4d}] '
+                    f'Loss = {loss.item():.4g} Avg Loss = {avg_loss:.4g} '
+                    f'Time = {time.perf_counter() - start_iter:.4f}s',
+                )
         start_iter = time.perf_counter()
 
     return avg_loss, time.perf_counter() - start_epoch
