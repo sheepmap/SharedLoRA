@@ -465,9 +465,14 @@ def main(args):
     if args.resume:
         print('resuming model, batch_size', args.batch_size)
         checkpoint, model, optimizer = load_model(args.checkpoint)
+        # 保留命令行传入的新参数
+        feat_loss_alpha = args.feat_loss_alpha
+        ref_acceleration_factor = args.ref_acceleration_factor
+        batch_size = args.batch_size
         args = checkpoint['args']
-        # args.batch_size = 28  # 原始代码硬编码为28
-        args.batch_size = args.batch_size  # 保留传入的 batch_size
+        args.batch_size = batch_size  # 保留传入的 batch_size
+        args.feat_loss_alpha = feat_loss_alpha  # 保留特征损失权重
+        args.ref_acceleration_factor = ref_acceleration_factor  # 保留参考分支倍数
         best_dev_loss = checkpoint['best_dev_loss']
         start_epoch = checkpoint['epoch']
         del checkpoint
