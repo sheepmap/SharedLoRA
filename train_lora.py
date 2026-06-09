@@ -167,6 +167,10 @@ def train_epoch(args, epoch, model, data_loader, optimizer, writer,
     start_epoch = start_iter = time.perf_counter()
     global_step = epoch * len(data_loader)
 
+    # 解析特征提取层参数
+    feat_extract_layers = tuple(int(x.strip()) for x in args.feat_extract_layers.split(','))
+    feat_extract_cascade = args.feat_extract_cascade
+
     for iter, data in enumerate(tqdm(data_loader)):
 
         target, acc_idx, mask_idx, ds_idx = data
@@ -186,7 +190,7 @@ def train_epoch(args, epoch, model, data_loader, optimizer, writer,
             # 提取训练分支特征
             output, features_train = extract_unet_features(
                 model, us_input_high, input_kspace_high, mask_high,
-                cascade_idx=-1, layer_indices=(1, 2))
+                cascade_idx=feat_extract_cascade, layer_indices=feat_extract_layers)
 
             # 生成低倍欠采样输入（参考分支）
             ref_acc_idx = [0] * target.shape[0]
@@ -201,7 +205,7 @@ def train_epoch(args, epoch, model, data_loader, optimizer, writer,
             with torch.no_grad():
                 _, features_ref = extract_unet_features(
                     ref_model, us_input_ref, input_kspace_ref, mask_ref,
-                    cascade_idx=-1, layer_indices=(1, 2))
+                    cascade_idx=feat_extract_cascade, layer_indices=feat_extract_layers)
 
             # 计算复合损失
             loss_img = F.l1_loss(output, target)
@@ -578,6 +582,10 @@ def create_arg_parser():
                         help='Weight for feature-domain cosine similarity loss (0 to disable)')
     parser.add_argument('--ref-acceleration-factor', type=str, default='4x',
                         help='Acceleration factor for the reference branch (低倍, e.g., 4x)')
+    parser.add_argument('--feat-extract-layers', type=str, default='1,2',
+                        help='Comma-separated layer indices for feature extraction (e.g., "0,1,2" or "1,2")')
+    parser.add_argument('--feat-extract-cascade', type=int, default=-1,
+                        help='Which cascade to extract features from (-1 for last cascade)')
 
     return parser
 
