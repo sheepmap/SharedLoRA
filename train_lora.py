@@ -119,33 +119,37 @@ def extract_unet_features(model_dncn, x, k, m, cascade_idx=-1, layer_indices=(1,
         x: 输入图像 [B, 1, H, W]
         k: 欠采样 k-space
         m: 欠采样 mask
-        cascade_idx: 提取哪个级联块的特征，-1 表示最后一个
+        cascade_idx: 提取哪个级联块的特征，-1 表示最后一个，可以是列表如 [2,3,4]
         layer_indices: 提取 up_sample_layers 的哪些层，默认 (1, 2) = 第5、6层（接近输出）
 
     Returns:
         output: 模型最终输出
-        features: dict {layer_index: feature_tensor [B, C, H, W]}
+        features: dict {(cascade_idx, layer_index): feature_tensor [B, C, H, W]}
     """
     features = {}
 
     # 处理 DataParallel 包装
     inner_model = model_dncn.module if hasattr(model_dncn, 'module') else model_dncn
 
-    if cascade_idx == -1:
-        cascade_idx = inner_model.nc - 1
-    unet_block_idx = 2 * cascade_idx + 1  # CSEUnetModel 在 conv_blocks 中的索引
-
-    unet_model = inner_model.conv_blocks[unet_block_idx]
+    # 处理 cascade_idx 为列表的情况
+    if isinstance(cascade_idx, (list, tuple)):
+        cascade_indices = [inner_model.nc - 1 if c == -1 else c for c in cascade_idx]
+    else:
+        cascade_indices = [inner_model.nc - 1 if cascade_idx == -1 else cascade_idx]
 
     # 注册 hook
     hooks = []
-    for li in layer_indices:
-        def make_hook(layer_id):
-            def hook_fn(module, inp, out):
-                features[layer_id] = out
-            return hook_fn
-        h = unet_model.up_sample_layers[li].register_forward_hook(make_hook(li))
-        hooks.append(h)
+    for ci in cascade_indices:
+        unet_block_idx = 2 * ci + 1  # CSEUnetModel 在 conv_blocks 中的索引
+        unet_model = inner_model.conv_blocks[unet_block_idx]
+
+        for li in layer_indices:
+            def make_hook(cascade_id, layer_id):
+                def hook_fn(module, inp, out):
+                    features[(cascade_id, layer_id)] = out
+                return hook_fn
+            h = unet_model.up_sample_layers[li].register_forward_hook(make_hook(ci, li))
+            hooks.append(h)
 
     output = model_dncn(x, k, m)
 
@@ -169,7 +173,7 @@ def train_epoch(args, epoch, model, data_loader, optimizer, writer,
 
     # 解析特征提取层参数
     feat_extract_layers = tuple(int(x.strip()) for x in args.feat_extract_layers.split(','))
-    feat_extract_cascade = args.feat_extract_cascade
+    feat_extract_cascade = [int(x.strip()) for x in args.feat_extract_cascade.split(',')]
 
     for iter, data in enumerate(tqdm(data_loader)):
 
@@ -209,9 +213,9 @@ def train_epoch(args, epoch, model, data_loader, optimizer, writer,
 
             # 计算复合损失
             loss_img = F.l1_loss(output, target)
-            loss_feat = (
-                cosine_similarity_loss(features_train[1], features_ref[1]) +
-                cosine_similarity_loss(features_train[2], features_ref[2])
+            loss_feat = sum(
+                cosine_similarity_loss(features_train[key], features_ref[key])
+                for key in features_train
             )
             loss = loss_img + args.feat_loss_alpha * loss_feat
 
@@ -584,8 +588,8 @@ def create_arg_parser():
                         help='Acceleration factor for the reference branch (低倍, e.g., 4x)')
     parser.add_argument('--feat-extract-layers', type=str, default='1,2',
                         help='Comma-separated layer indices for feature extraction (e.g., "0,1,2" or "1,2")')
-    parser.add_argument('--feat-extract-cascade', type=int, default=-1,
-                        help='Which cascade to extract features from (-1 for last cascade)')
+    parser.add_argument('--feat-extract-cascade', type=str, default='-1',
+                        help='Comma-separated cascade indices for feature extraction (-1 for last cascade, e.g., "2,3,4")')
 
     return parser
 

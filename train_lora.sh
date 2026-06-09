@@ -26,8 +26,8 @@ MELORA_TARGET="up_sample_layers"
 # Feature loss settings
 FEAT_LOSS_ALPHA=0.1          # 特征损失权重，设为 0 禁用
 REF_ACC_FACTOR='4x'          # 参考分支的低倍欠采样倍数
-FEAT_EXTRACT_LAYERS='1,2'    # 特征提取层索引，如 "0,1,2" 或 "1,2"
-FEAT_EXTRACT_CASCADE=-1      # 提取哪个级联的特征，-1 表示最后一个
+FEAT_EXTRACT_LAYERS='2'    # 特征提取层索引，如 "0,1,2" 或 "1,2"
+FEAT_EXTRACT_CASCADE='2,3,4'  # 提取哪些级联的特征，-1 表示最后一个，如 "2,3,4"
 
 echo python train_lora.py --pretrained-checkpoint ${PRETRAINED_CHECKPOINT} --batch-size ${BATCH_SIZE} --num-epochs ${NUM_EPOCHS} --lr ${LR} --lr-step-size ${LR_STEP_SIZE} --lr-gamma ${LR_GAMMA} --lr-eta-min ${LR_ETA_MIN} --device ${DEVICE} --exp-dir ${EXP_DIR} --train-path ${TRAIN_PATH} --validation-path ${VALIDATION_PATH} --dataset_type ${DATASET_TYPE} --usmask_path ${USMASK_PATH} --acceleration_factor ${ACC_FACTORS} --mask_type ${MASK_TYPE} --melora_r ${MELORA_R} --melora_alpha ${MELORA_ALPHA} --melora_dropout ${MELORA_DROPOUT} --melora_target ${MELORA_TARGET} --feat-loss-alpha ${FEAT_LOSS_ALPHA} --ref-acceleration-factor ${REF_ACC_FACTOR} --feat-extract-layers ${FEAT_EXTRACT_LAYERS} --feat-extract-cascade ${FEAT_EXTRACT_CASCADE}
 
