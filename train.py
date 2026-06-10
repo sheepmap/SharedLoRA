@@ -320,7 +320,7 @@ def main(args):
 
         train_loss,train_time = train_epoch(args, epoch, model, train_loader,optimizer,writer, mask_bank, acc_factors, mask_types, dataset_types)
         dev_loss, dev_psnr, dev_ssim, dev_time = evaluate(args, epoch, model, dev_loader, writer, mask_bank, acc_factors, mask_types, dataset_types)
-        visualize(args, epoch, model, display1_loader, writer,'t1', mask_bank, acc_factors, mask_types, dataset_types)
+        visualize(args, epoch, model, display1_loader, writer,'t1')
         scheduler.step()
 
         is_new_best = dev_psnr > best_psnr
