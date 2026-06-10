@@ -349,7 +349,7 @@ def _make_melora_dirname(args):
     target_str = args.melora_target.replace(',', '_') if args.melora_target else 'all'
     return f'r{r_str}_{target_str}'
 
-def save_model(args, save_dir, epoch, model, optimizer, best_psnr, is_new_best):
+def save_model(args, save_dir, epoch, model, optimizer, scheduler, best_psnr, is_new_best):
     """Save LoRA adapter + training metadata to save_dir. No base weights (they don't change)."""
     lora_state = {k: v for k, v in model.state_dict().items() if 'lora_' in k}
 
@@ -359,6 +359,7 @@ def save_model(args, save_dir, epoch, model, optimizer, best_psnr, is_new_best):
             'epoch': epoch,
             'args': args,
             'optimizer': optimizer.state_dict(),
+            'scheduler': scheduler.state_dict(),
             'best_psnr': best_psnr,
         },
         f=save_dir / 'checkpoint.pt'
@@ -500,20 +501,27 @@ def main(args):
         args.feat_loss_alpha = feat_loss_alpha  # 保留特征损失权重
         args.ref_acceleration_factor = ref_acceleration_factor  # 保留参考分支倍数
         best_psnr = checkpoint.get('best_psnr', 0.)
-        start_epoch = checkpoint['epoch']
+        start_epoch = checkpoint['epoch'] + 1
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=args.lr_eta_min)
+        if 'scheduler' in checkpoint:
+            scheduler.load_state_dict(checkpoint['scheduler'])
+        else:
+            for _ in range(start_epoch):
+                scheduler.step()
+            optimizer.param_groups[0]['lr'] = args.lr
         del checkpoint
     else:
         model = build_model_from_pretrained(args)
         if args.data_parallel:
             model = torch.nn.DataParallel(model)
         optimizer = build_optim(args, model.parameters())
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=args.lr_eta_min)
         best_psnr = 0.
         start_epoch = 0
 
     logging.info(args)
     logging.info(model)
     train_loader, dev_loader, display1_loader = create_data_loaders(args)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=args.lr_eta_min)
 
     acc_factors = args.acceleration_factor.split(',')
     mask_types = args.mask_type.split(',')
@@ -541,7 +549,7 @@ def main(args):
 
         is_new_best = dev_psnr > best_psnr
         best_psnr = max(best_psnr, dev_psnr)
-        save_model(args, melora_dir, epoch, model, optimizer, best_psnr, is_new_best)
+        save_model(args, melora_dir, epoch, model, optimizer, scheduler, best_psnr, is_new_best)
         logging.info(
             f'Epoch = [{epoch:4d}/{args.num_epochs:4d}] TrainLoss = {train_loss:.4g} '
             f'DevLoss = {dev_loss:.4g} PSNR = {dev_psnr:.4g} SSIM = {dev_ssim:.4g} '
