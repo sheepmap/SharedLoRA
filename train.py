@@ -52,22 +52,22 @@ def create_data_loaders(args):
     train_loader = DataLoader(
         dataset=train_data,
         batch_size=args.batch_size,
-        shuffle=True
-        #num_workers=64,
-        #pin_memory=True,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
     )
     dev_loader = DataLoader(
         dataset=dev_data,
         batch_size=args.batch_size,
-        #num_workers=64,
-        #pin_memory=True,
+        num_workers=4,
+        pin_memory=True,
     )
     display_loader1 = DataLoader(
         dataset=display1,
         batch_size=16,
-        shuffle=True
-        #num_workers=64,
-        #pin_memory=True,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
     )
 
     return train_loader, dev_loader, display_loader1
