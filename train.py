@@ -205,16 +205,16 @@ def visualize(args, epoch, model, data_loader, writer, datasettype_string, mask_
                 target, acc_idx, mask_idx, ds_idx = data
                 target = target.unsqueeze(1).to(args.device)
                 us_input, input_kspace, mask = gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, mask_types, dataset_types)
+                us_input = us_input.squeeze(1).float()  # [B, 1, 1, H, W] -> [B, 1, H, W]
+                input_kspace = input_kspace.squeeze(1).float()  # [B, 1, H, W, 2] -> [B, H, W, 2]
             else:
                 # SliceDisplayDataDev returns (input_img, input_kspace, target, mask)
                 us_input, input_kspace, target, mask = data
-                us_input = us_input.unsqueeze(1).to(args.device)
-                input_kspace = input_kspace.to(args.device)
+                us_input = us_input.unsqueeze(1).to(args.device).float()  # [B, H, W] -> [B, 1, H, W]
+                input_kspace = input_kspace.to(args.device).float()
                 target = target.unsqueeze(1).to(args.device)
                 mask = mask.to(args.device)
 
-            us_input = us_input.squeeze(1).float()  # [B, 1, 1, H, W] -> [B, 1, H, W]
-            input_kspace = input_kspace.squeeze(1).float() if input_kspace.dim() == 5 else input_kspace.float()
             target = target.float()
             output = model(us_input,input_kspace,mask)
 
