@@ -21,6 +21,7 @@ from torch import nn
 from torch.autograd import Variable
 from torch import optim
 from tqdm import tqdm
+from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -264,6 +265,8 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
 
     model.eval()
     losses = []
+    psnr_list = []
+    ssim_list = []
     start = time.perf_counter()
 
     with torch.no_grad():
@@ -282,10 +285,25 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
             loss = F.mse_loss(output,target)
             losses.append(loss.item())
 
+            # 逐 slice 计算 PSNR/SSIM
+            output_np = output.detach().cpu().numpy().squeeze(1)  # [B, H, W]
+            target_np = target.detach().cpu().numpy().squeeze(1)
+            for b in range(output_np.shape[0]):
+                gt = target_np[b]
+                pred = output_np[b]
+                data_range = gt.max()
+                if data_range > 0:
+                    psnr_list.append(peak_signal_noise_ratio(gt, pred, data_range=data_range))
+                    ssim_list.append(structural_similarity(gt, pred, data_range=data_range))
 
-        writer.add_scalar('Dev_Loss',np.mean(losses),epoch)
+        avg_loss = np.mean(losses)
+        avg_psnr = np.mean(psnr_list)
+        avg_ssim = np.mean(ssim_list)
+        writer.add_scalar('Dev_Loss', avg_loss, epoch)
+        writer.add_scalar('Dev_PSNR', avg_psnr, epoch)
+        writer.add_scalar('Dev_SSIM', avg_ssim, epoch)
 
-    return np.mean(losses), time.perf_counter() - start
+    return avg_loss, avg_psnr, avg_ssim, time.perf_counter() - start
 
 
 def visualize(args, epoch, model, data_loader, writer, datasettype_string, mask_bank=None, acc_factors=None, mask_types=None, dataset_types=None):
@@ -331,7 +349,7 @@ def _make_melora_dirname(args):
     target_str = args.melora_target.replace(',', '_') if args.melora_target else 'all'
     return f'r{r_str}_{target_str}'
 
-def save_model(args, save_dir, epoch, model, optimizer, best_dev_loss, is_new_best):
+def save_model(args, save_dir, epoch, model, optimizer, best_psnr, is_new_best):
     """Save LoRA adapter + training metadata to save_dir. No base weights (they don't change)."""
     lora_state = {k: v for k, v in model.state_dict().items() if 'lora_' in k}
 
@@ -341,7 +359,7 @@ def save_model(args, save_dir, epoch, model, optimizer, best_dev_loss, is_new_be
             'epoch': epoch,
             'args': args,
             'optimizer': optimizer.state_dict(),
-            'best_dev_loss': best_dev_loss,
+            'best_psnr': best_psnr,
         },
         f=save_dir / 'checkpoint.pt'
     )
@@ -481,7 +499,7 @@ def main(args):
         args.batch_size = batch_size  # 保留传入的 batch_size
         args.feat_loss_alpha = feat_loss_alpha  # 保留特征损失权重
         args.ref_acceleration_factor = ref_acceleration_factor  # 保留参考分支倍数
-        best_dev_loss = checkpoint['best_dev_loss']
+        best_psnr = checkpoint.get('best_psnr', 0.)
         start_epoch = checkpoint['epoch']
         del checkpoint
     else:
@@ -489,7 +507,7 @@ def main(args):
         if args.data_parallel:
             model = torch.nn.DataParallel(model)
         optimizer = build_optim(args, model.parameters())
-        best_dev_loss = 1e9
+        best_psnr = 0.
         start_epoch = 0
 
     logging.info(args)
@@ -517,16 +535,17 @@ def main(args):
             args, epoch, model, train_loader, optimizer, writer,
             mask_bank, acc_factors, mask_types, dataset_types,
             ref_model=ref_model, mask_bank_ref=mask_bank_ref)
-        dev_loss,dev_time = evaluate(args, epoch, model, dev_loader, writer, mask_bank, acc_factors, mask_types, dataset_types)
+        dev_loss, dev_psnr, dev_ssim, dev_time = evaluate(args, epoch, model, dev_loader, writer, mask_bank, acc_factors, mask_types, dataset_types)
         visualize(args, epoch, model, display1_loader, writer, 't1')
         scheduler.step()
 
-        is_new_best = dev_loss < best_dev_loss
-        best_dev_loss = min(best_dev_loss,dev_loss)
-        save_model(args, melora_dir, epoch, model, optimizer,best_dev_loss,is_new_best)
+        is_new_best = dev_psnr > best_psnr
+        best_psnr = max(best_psnr, dev_psnr)
+        save_model(args, melora_dir, epoch, model, optimizer, best_psnr, is_new_best)
         logging.info(
-            f'Epoch = [{epoch:4d}/{args.num_epochs:4d}] TrainLoss = {train_loss:.4g}'
-            f'DevLoss= {dev_loss:.4g} TrainTime = {train_time:.4f}s DevTime = {dev_time:.4f}s',
+            f'Epoch = [{epoch:4d}/{args.num_epochs:4d}] TrainLoss = {train_loss:.4g} '
+            f'DevLoss = {dev_loss:.4g} PSNR = {dev_psnr:.4g} SSIM = {dev_ssim:.4g} '
+            f'TrainTime = {train_time:.4f}s DevTime = {dev_time:.4f}s',
         )
     writer.close()
 

@@ -20,6 +20,7 @@ from torch import nn
 from torch.autograd import Variable
 from torch import optim
 from tqdm import tqdm
+from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,8 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
 
     model.eval()
     losses = []
+    psnr_list = []
+    ssim_list = []
     start = time.perf_counter()
 
     with torch.no_grad():
@@ -160,12 +163,26 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
 
             loss = F.mse_loss(output,target)
             losses.append(loss.item())
-            #break
 
-            
-        writer.add_scalar('Dev_Loss',np.mean(losses),epoch)
-       
-    return np.mean(losses), time.perf_counter() - start
+            # 逐 slice 计算 PSNR/SSIM
+            output_np = output.detach().cpu().numpy().squeeze(1)  # [B, H, W]
+            target_np = target.detach().cpu().numpy().squeeze(1)
+            for b in range(output_np.shape[0]):
+                gt = target_np[b]
+                pred = output_np[b]
+                data_range = gt.max()
+                if data_range > 0:
+                    psnr_list.append(peak_signal_noise_ratio(gt, pred, data_range=data_range))
+                    ssim_list.append(structural_similarity(gt, pred, data_range=data_range))
+
+        avg_loss = np.mean(losses)
+        avg_psnr = np.mean(psnr_list)
+        avg_ssim = np.mean(ssim_list)
+        writer.add_scalar('Dev_Loss', avg_loss, epoch)
+        writer.add_scalar('Dev_PSNR', avg_psnr, epoch)
+        writer.add_scalar('Dev_SSIM', avg_ssim, epoch)
+
+    return avg_loss, avg_psnr, avg_ssim, time.perf_counter() - start
 
 
 def visualize(args, epoch, model, data_loader, writer, datasettype_string, mask_bank=None, acc_factors=None, mask_types=None, dataset_types=None):
@@ -204,7 +221,7 @@ def visualize(args, epoch, model, data_loader, writer, datasettype_string, mask_
             save_image(torch.abs(target.float() - output.float()), 'Error_{}'.format(datasettype_string))
             break
 
-def save_model(args, exp_dir, epoch, model, optimizer, scheduler, best_dev_loss,is_new_best):
+def save_model(args, exp_dir, epoch, model, optimizer, scheduler, best_psnr, is_new_best):
 
     out = torch.save(
         {
@@ -213,7 +230,7 @@ def save_model(args, exp_dir, epoch, model, optimizer, scheduler, best_dev_loss,
             'model': model.state_dict(),
             'optimizer': optimizer.state_dict(),
             'scheduler': scheduler.state_dict(),
-            'best_dev_loss': best_dev_loss,
+            'best_psnr': best_psnr,
             'exp_dir':exp_dir
         },
         f=exp_dir / 'model.pt'
@@ -258,7 +275,7 @@ def main(args):
         print('resuming model, batch_size', args.batch_size)
         checkpoint, model, optimizer = load_model(args.checkpoint)
         args = checkpoint['args']
-        best_dev_loss = checkpoint['best_dev_loss']
+        best_psnr = checkpoint.get('best_psnr', 0.)
         start_epoch = checkpoint['epoch'] + 1
         # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_step_size, args.lr_gamma)
         # 注释原因：StepLR 在短训练（如10 epoch）中衰减次数过少（lr_step_size=40 时整个训练期间学习率不变），
@@ -284,7 +301,7 @@ def main(args):
         # 注释原因：StepLR 在短训练（如10 epoch）中衰减次数过少（lr_step_size=40 时整个训练期间学习率不变），
         # 改为 CosineAnnealingLR 使学习率在整个训练周期内平滑下降，更适合短周期训练。
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=args.lr_eta_min)
-        best_dev_loss = 1e9
+        best_psnr = 0.
         start_epoch = 0
 
     logging.info(args)
@@ -299,16 +316,17 @@ def main(args):
     for epoch in range(start_epoch, args.num_epochs):
 
         train_loss,train_time = train_epoch(args, epoch, model, train_loader,optimizer,writer, mask_bank, acc_factors, mask_types, dataset_types)
-        dev_loss,dev_time = evaluate(args, epoch, model, dev_loader, writer, mask_bank, acc_factors, mask_types, dataset_types)
+        dev_loss, dev_psnr, dev_ssim, dev_time = evaluate(args, epoch, model, dev_loader, writer, mask_bank, acc_factors, mask_types, dataset_types)
         visualize(args, epoch, model, display1_loader, writer,'t1', mask_bank, acc_factors, mask_types, dataset_types)
         scheduler.step()
 
-        is_new_best = dev_loss < best_dev_loss
-        best_dev_loss = min(best_dev_loss,dev_loss)
-        save_model(args, args.exp_dir, epoch, model, optimizer, scheduler, best_dev_loss,is_new_best)
+        is_new_best = dev_psnr > best_psnr
+        best_psnr = max(best_psnr, dev_psnr)
+        save_model(args, args.exp_dir, epoch, model, optimizer, scheduler, best_psnr, is_new_best)
         logging.info(
-            f'Epoch = [{epoch:4d}/{args.num_epochs:4d}] TrainLoss = {train_loss:.4g}'
-            f'DevLoss= {dev_loss:.4g} TrainTime = {train_time:.4f}s DevTime = {dev_time:.4f}s',
+            f'Epoch = [{epoch:4d}/{args.num_epochs:4d}] TrainLoss = {train_loss:.4g} '
+            f'DevLoss = {dev_loss:.4g} PSNR = {dev_psnr:.4g} SSIM = {dev_ssim:.4g} '
+            f'TrainTime = {train_time:.4f}s DevTime = {dev_time:.4f}s',
         )
     writer.close()
 
