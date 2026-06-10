@@ -112,6 +112,8 @@ def evaluate(args, recons_key):
     metrics = Metrics(METRIC_FUNCS)
 
     for tgt_file in args.target_path.iterdir():
+        if tgt_file.suffix != '.h5':
+            continue
         #print (tgt_file)
         with h5py.File(tgt_file) as target, h5py.File(
           args.predictions_path / tgt_file.name) as recons:

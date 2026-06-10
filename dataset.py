@@ -26,7 +26,7 @@ class SliceData(Dataset):
                 newroot = os.path.join(dataroot, mask_type,train_or_valid)
                 for acc_factor in acc_factors:
                     #print("acc_factor: ", acc_factor)
-                    files = list(pathlib.Path(os.path.join(newroot,'acc_{}'.format(acc_factor))).iterdir())
+                    files = [f for f in pathlib.Path(os.path.join(newroot,'acc_{}'.format(acc_factor))).iterdir() if f.suffix == '.h5']
                     for fname in sorted(files):
                         with h5py.File(fname,'r') as hf:
                             fsvol = hf['volfs']
@@ -59,8 +59,8 @@ class SliceDataDev(Dataset):
 
     def __init__(self, root,acc_factor,dataset_type,mask_type,mask_path):
 
-        # List the h5 files in root 
-        files = list(pathlib.Path(root).iterdir())
+        # List the h5 files in root
+        files = [f for f in pathlib.Path(root).iterdir() if f.suffix == '.h5']
         self.examples = []
         self.mask_path = mask_path
 
@@ -101,7 +101,7 @@ class SliceDisplayDataDev(Dataset):
 
         newroot = os.path.join(root, dataset_type,mask_type,'validation','acc_{}'.format(acc_factor))
         # List the h5 files in root 
-        files = list(pathlib.Path(newroot).iterdir())
+        files = [f for f in pathlib.Path(newroot).iterdir() if f.suffix == '.h5']
         self.examples = []
         self.acc_factor = acc_factor
         self.dataset_type = dataset_type
