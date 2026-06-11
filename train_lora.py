@@ -102,13 +102,25 @@ def gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, m
     return us_img.unsqueeze(1), torch.view_as_real(us_kspace), mask
 
 
-def cosine_similarity_loss(feat_a, feat_b):
-    """计算两个特征图的余弦相似度损失。输入形状 [B, C, H, W]，返回标量。"""
+# def cosine_similarity_loss(feat_a, feat_b):
+#     """计算两个特征图的余弦相似度损失。输入形状 [B, C, H, W]，返回标量。"""
+#     B = feat_a.shape[0]
+#     fa = feat_a.reshape(B, -1)  # 展平 C*H*W
+#     fb = feat_b.reshape(B, -1)
+#     cos_sim = F.cosine_similarity(fa, fb, dim=1)  # [B]
+#     return (1 - cos_sim).mean()
+def cosine_similarity_loss(feat_a, feat_b, use_channel_pool=False):
+    """计算两个特征图的余弦相似度损失。"""
+    if use_channel_pool:
+        # 通道维度全局平均池化：[B, C, H, W] -> [B, 1, H, W]
+        feat_a = feat_a.mean(dim=1, keepdim=True)
+        feat_b = feat_b.mean(dim=1, keepdim=True)
     B = feat_a.shape[0]
-    fa = feat_a.reshape(B, -1)  # 展平 C*H*W
+    fa = feat_a.reshape(B, -1)
     fb = feat_b.reshape(B, -1)
-    cos_sim = F.cosine_similarity(fa, fb, dim=1)  # [B]
+    cos_sim = F.cosine_similarity(fa, fb, dim=1)
     return (1 - cos_sim).mean()
+
 
 
 def extract_unet_features(model_dncn, x, k, m, cascade_idx=-1, layer_indices=(1, 2)):
@@ -215,7 +227,7 @@ def train_epoch(args, epoch, model, data_loader, optimizer, writer,
             # 计算复合损失
             loss_img = F.l1_loss(output, target)
             loss_feat = sum(
-                cosine_similarity_loss(features_train[key], features_ref[key])
+                cosine_similarity_loss(features_train[key], features_ref[key], args.use_channel_pool)
                 for key in features_train
             )
             loss = loss_img + args.feat_loss_alpha * loss_feat
@@ -617,6 +629,8 @@ def create_arg_parser():
                         help='Comma-separated layer indices for feature extraction (e.g., "0,1,2" or "1,2")')
     parser.add_argument('--feat-extract-cascade', type=str, default='-1',
                         help='Comma-separated cascade indices for feature extraction (-1 for last cascade, e.g., "2,3,4")')
+    parser.add_argument('--use-channel-pool', action='store_true', default=False,
+                        help='Use channel-wise average pooling before computing cosine similarity loss')
 
     return parser
 
