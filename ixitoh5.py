@@ -76,8 +76,8 @@ def preprocess_ixi_to_h5(nifti_path, output_path, acc_factor=4, mask_type='carte
 import os
 import glob
 
-def batch_preprocess(input_dir, output_dir, dataset_type='ixi_pd', mask_type='cartesian', 
-                     acc_factors=[4, 5, 8], mask_base_path=None):
+def batch_preprocess(input_dir, output_dir, dataset_type='ixi_pd', mask_type='cartesian',
+                     acc_factors=[4, 5, 8], mask_base_path=None, skip_train=False):
     """
     批量预处理 IXI 数据集
     
@@ -127,11 +127,14 @@ def batch_preprocess(input_dir, output_dir, dataset_type='ixi_pd', mask_type='ca
         print(f"  Train files: {len(train_files)}, Val files: {len(val_files)}, Test files: {len(test_files)}")
 
         # 处理训练集（只保存 volfs）
-        for fpath in train_files:
-            fname = os.path.basename(fpath).replace('.nii.gz', '.h5')
-            output_path = os.path.join(train_dir, fname)
-            preprocess_ixi_to_h5(fpath, output_path, acc, mask_type, mask_base_path, dataset_type, split='train')
-            print(f"  [Train] Processed: {output_path}")
+        if not skip_train:
+            for fpath in train_files:
+                fname = os.path.basename(fpath).replace('.nii.gz', '.h5')
+                output_path = os.path.join(train_dir, fname)
+                preprocess_ixi_to_h5(fpath, output_path, acc, mask_type, mask_base_path, dataset_type, split='train')
+                print(f"  [Train] Processed: {output_path}")
+        else:
+            print(f"  [Train] Skipped (skip_train=True)")
 
         # 处理验证集（保存 volfs + img_volus + kspace_volus）
         for fpath in val_files:
@@ -174,4 +177,15 @@ if __name__ == '__main__':
     #     mask_type='cartesian',
     #     acc_factors=[4, 5, 8],
     #     mask_base_path=r'C:\Users\admin\Desktop\1\代码\SHFormer-master'  # 预生成掩码所在路径 (usmasks 目录的父目录)
+    # )
+
+    # 示例3: 只处理 validation 和 test（跳过 train，适用于 train 已用软链接的情况）
+    # batch_preprocess(
+    #     input_dir='/root/autodl-tmp/ixi/ixi_t2',
+    #     output_dir='/root/autodl-tmp/SHFormer-master/datasets',
+    #     dataset_type='ixi_t2',
+    #     mask_type='cartesian',
+    #     acc_factors=[4],
+    #     mask_base_path='/root/autodl-tmp/SHFormer-master',
+    #     skip_train=True
     # )
