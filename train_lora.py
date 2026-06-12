@@ -586,12 +586,6 @@ def create_arg_parser():
     parser.add_argument('--batch-size', default=2, type=int,  help='Mini batch size')
     parser.add_argument('--num-epochs', type=int, default=150, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
-    parser.add_argument('--lr-step-size', type=int, default=40,
-                        help='Period of learning rate decay')
-    parser.add_argument('--lr-gamma', type=float, default=0.1,
-                        help='Multiplicative factor of learning rate decay')
-    parser.add_argument('--lr-eta-min', type=float, default=1e-7,
-                        help='Minimum learning rate for cosine annealing')
     parser.add_argument('--weight-decay', type=float, default=0.,
                         help='Strength of weight decay regularization')
     parser.add_argument('--report-interval', type=int, default=100, help='Period of loss reporting')

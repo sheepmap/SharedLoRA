@@ -7,9 +7,6 @@ ACC_FACTORS='8x' #'4x' #,'5x','8x'
 BATCH_SIZE=6
 NUM_EPOCHS=3
 LR=1e-4
-LR_STEP_SIZE=3
-LR_ETA_MIN=1e-6
-LR_GAMMA=0.5
 DEVICE='cuda:0'
 EXP_DIR=${BASE_PATH}'/experiments/'${DATASET_TYPE}'/'${MASK_TYPE}'/acc_'${ACC_FACTORS}'/'${MODEL}
 TRAIN_PATH=${BASE_PATH}'/datasets/'
@@ -35,16 +32,13 @@ if [ "${USE_CHANNEL_POOL}" = true ]; then
     CHANNEL_POOL_FLAG="--use-channel-pool"
 fi
 
-echo python train_lora.py --pretrained-checkpoint ${PRETRAINED_CHECKPOINT} --batch-size ${BATCH_SIZE} --num-epochs ${NUM_EPOCHS} --lr ${LR} --lr-step-size ${LR_STEP_SIZE} --lr-gamma ${LR_GAMMA} --lr-eta-min ${LR_ETA_MIN} --device ${DEVICE} --exp-dir ${EXP_DIR} --train-path ${TRAIN_PATH} --validation-path ${VALIDATION_PATH} --dataset_type ${DATASET_TYPE} --usmask_path ${USMASK_PATH} --acceleration_factor ${ACC_FACTORS} --mask_type ${MASK_TYPE} --melora_r ${MELORA_R} --melora_alpha ${MELORA_ALPHA} --melora_dropout ${MELORA_DROPOUT} --melora_target ${MELORA_TARGET} --feat-loss-alpha ${FEAT_LOSS_ALPHA} --ref-acceleration-factor ${REF_ACC_FACTOR} --feat-extract-layers ${FEAT_EXTRACT_LAYERS} --feat-extract-cascade ${FEAT_EXTRACT_CASCADE} ${CHANNEL_POOL_FLAG}
+echo python train_lora.py --pretrained-checkpoint ${PRETRAINED_CHECKPOINT} --batch-size ${BATCH_SIZE} --num-epochs ${NUM_EPOCHS} --lr ${LR} --device ${DEVICE} --exp-dir ${EXP_DIR} --train-path ${TRAIN_PATH} --validation-path ${VALIDATION_PATH} --dataset_type ${DATASET_TYPE} --usmask_path ${USMASK_PATH} --acceleration_factor ${ACC_FACTORS} --mask_type ${MASK_TYPE} --melora_r ${MELORA_R} --melora_alpha ${MELORA_ALPHA} --melora_dropout ${MELORA_DROPOUT} --melora_target ${MELORA_TARGET} --feat-loss-alpha ${FEAT_LOSS_ALPHA} --ref-acceleration-factor ${REF_ACC_FACTOR} --feat-extract-layers ${FEAT_EXTRACT_LAYERS} --feat-extract-cascade ${FEAT_EXTRACT_CASCADE} ${CHANNEL_POOL_FLAG}
 
 python train_lora.py \
     --pretrained-checkpoint ${PRETRAINED_CHECKPOINT} \
     --batch-size ${BATCH_SIZE} \
     --num-epochs ${NUM_EPOCHS} \
     --lr ${LR} \
-    --lr-step-size ${LR_STEP_SIZE} \
-    --lr-gamma ${LR_GAMMA} \
-    --lr-eta-min ${LR_ETA_MIN} \
     --device ${DEVICE} \
     --exp-dir ${EXP_DIR} \
     --train-path ${TRAIN_PATH} \
