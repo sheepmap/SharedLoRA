@@ -173,7 +173,7 @@ def extract_unet_features(model_dncn, x, k, m, cascade_idx=-1, layer_indices=(1,
     return output, features
 
 
-def train_epoch(args, epoch, model, data_loader, optimizer, writer,
+def train_epoch(args, epoch, model, data_loader, optimizer, scheduler, writer,
                 mask_bank, acc_factors, mask_types, dataset_types,
                 ref_model=None, mask_bank_ref=None):
 
@@ -244,6 +244,7 @@ def train_epoch(args, epoch, model, data_loader, optimizer, writer,
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        scheduler.step()
 
         avg_loss = 0.99 * avg_loss + 0.01 * loss.item() if iter > 0 else loss.item()
         writer.add_scalar('TrainLoss', loss.item(), global_step + iter)
@@ -492,7 +493,7 @@ def load_model(checkpoint_file):
 
 
 def build_optim(args, params):
-    optimizer = torch.optim.Adam(params, args.lr, weight_decay=args.weight_decay)
+    optimizer = torch.optim.AdamW(params, args.lr, weight_decay=args.weight_decay)
     return optimizer
 
 
@@ -514,26 +515,30 @@ def main(args):
         args.ref_acceleration_factor = ref_acceleration_factor  # 保留参考分支倍数
         best_psnr = checkpoint.get('best_psnr', 0.)
         start_epoch = checkpoint['epoch'] + 1
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=args.lr_eta_min)
-        if 'scheduler' in checkpoint:
-            scheduler.load_state_dict(checkpoint['scheduler'])
-        else:
-            for _ in range(start_epoch):
-                scheduler.step()
-            optimizer.param_groups[0]['lr'] = args.lr
         del checkpoint
     else:
         model = build_model_from_pretrained(args)
         if args.data_parallel:
             model = torch.nn.DataParallel(model)
         optimizer = build_optim(args, model.parameters())
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=args.lr_eta_min)
         best_psnr = 0.
         start_epoch = 0
 
     logging.info(args)
     logging.info(model)
     train_loader, dev_loader, display1_loader = create_data_loaders(args)
+
+    # OneCycleLR: warmup + cosine decay, 每个 batch 更新一次
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, max_lr=args.lr,
+        steps_per_epoch=len(train_loader),
+        epochs=args.num_epochs,
+        pct_start=0.1
+    )
+    # resume 时快速追赶 scheduler 到上次中断的位置
+    if start_epoch > 0:
+        for _ in range(start_epoch * len(train_loader)):
+            scheduler.step()
 
     acc_factors = args.acceleration_factor.split(',')
     mask_types = args.mask_type.split(',')
@@ -552,12 +557,11 @@ def main(args):
     for epoch in range(start_epoch, args.num_epochs):
 
         train_loss, train_time = train_epoch(
-            args, epoch, model, train_loader, optimizer, writer,
+            args, epoch, model, train_loader, optimizer, scheduler, writer,
             mask_bank, acc_factors, mask_types, dataset_types,
             ref_model=ref_model, mask_bank_ref=mask_bank_ref)
         dev_loss, dev_psnr, dev_ssim, dev_time = evaluate(args, epoch, model, dev_loader, writer, mask_bank, acc_factors, mask_types, dataset_types)
         visualize(args, epoch, model, display1_loader, writer, 't1')
-        scheduler.step()
 
         is_new_best = dev_psnr > best_psnr
         best_psnr = max(best_psnr, dev_psnr)
