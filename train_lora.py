@@ -109,21 +109,15 @@ def gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, m
 #     fb = feat_b.reshape(B, -1)
 #     cos_sim = F.cosine_similarity(fa, fb, dim=1)  # [B]
 #     return (1 - cos_sim).mean()
-def cosine_similarity_loss(feat_a, feat_b, use_channel_pool=False):
-    """计算两个特征图的余弦相似度损失。"""
-    if use_channel_pool:
-        # 通道维度全局平均池化：[B, C, H, W] -> [B, 1, H, W]
-        feat_a = feat_a.mean(dim=1, keepdim=True)
-        feat_b = feat_b.mean(dim=1, keepdim=True)
-    B = feat_a.shape[0]
-    fa = feat_a.reshape(B, -1)
-    fb = feat_b.reshape(B, -1)
-    cos_sim = F.cosine_similarity(fa, fb, dim=1)
-    return (1 - cos_sim).mean()
+def attention_map_loss(feat_a, feat_b):
+    """计算两个特征图的注意力图 L1 损失。[B, C, H, W] -> [B, H, W] 注意力图 -> L1 loss。"""
+    attn_a = feat_a.pow(2).mean(dim=1)  # [B, H, W]
+    attn_b = feat_b.pow(2).mean(dim=1)  # [B, H, W]
+    return F.l1_loss(attn_a, attn_b)
 
 
 
-def extract_unet_features(model_dncn, x, k, m, cascade_idx=-1, layer_indices=(1, 2)):
+def extract_unet_features(model_dncn, x, k, m, cascade_idx=-1, layer_indices=(1, 2), layer_types=("up",)):
     """
     运行 DnCn 前向传播，提取指定级联块的 CSEUnetModel 中间特征。
 
@@ -133,11 +127,12 @@ def extract_unet_features(model_dncn, x, k, m, cascade_idx=-1, layer_indices=(1,
         k: 欠采样 k-space
         m: 欠采样 mask
         cascade_idx: 提取哪个级联块的特征，-1 表示最后一个，可以是列表如 [2,3,4]
-        layer_indices: 提取 up_sample_layers 的哪些层，默认 (1, 2) = 第5、6层（接近输出）
+        layer_indices: 提取哪些层，默认 (1, 2)
+        layer_types: 从哪些层类型提取，可选 "up"（up_sample_layers）、"down"（down_sample_layers）、"both"
 
     Returns:
         output: 模型最终输出
-        features: dict {(cascade_idx, layer_index): feature_tensor [B, C, H, W]}
+        features: dict {(cascade_idx, layer_type, layer_index): feature_tensor [B, C, H, W]}
     """
     features = {}
 
@@ -150,19 +145,34 @@ def extract_unet_features(model_dncn, x, k, m, cascade_idx=-1, layer_indices=(1,
     else:
         cascade_indices = [inner_model.nc - 1 if cascade_idx == -1 else cascade_idx]
 
+    # 解析 layer_types
+    if "both" in layer_types:
+        layer_types = ("up", "down")
+
+    # 确定每种层类型对应的 ModuleList
+    layer_map = {
+        "up": lambda unet: unet.up_sample_layers,
+        "down": lambda unet: unet.down_sample_layers,
+        "conv": lambda unet: [unet.conv],
+    }
+
     # 注册 hook
     hooks = []
     for ci in cascade_indices:
         unet_block_idx = 2 * ci + 1  # CSEUnetModel 在 conv_blocks 中的索引
         unet_model = inner_model.conv_blocks[unet_block_idx]
 
-        for li in layer_indices:
-            def make_hook(cascade_id, layer_id):
-                def hook_fn(module, inp, out):
-                    features[(cascade_id, layer_id)] = out
-                return hook_fn
-            h = unet_model.up_sample_layers[li].register_forward_hook(make_hook(ci, li))
-            hooks.append(h)
+        for lt in layer_types:
+            target_layers = layer_map[lt](unet_model)
+            for li in layer_indices:
+                if li >= len(target_layers):
+                    continue
+                def make_hook(cascade_id, layer_type, layer_id):
+                    def hook_fn(module, inp, out):
+                        features[(cascade_id, layer_type, layer_id)] = out
+                    return hook_fn
+                h = target_layers[li].register_forward_hook(make_hook(ci, lt, li))
+                hooks.append(h)
 
     output = model_dncn(x, k, m)
 
@@ -187,6 +197,7 @@ def train_epoch(args, epoch, model, data_loader, optimizer, scheduler, writer,
     # 解析特征提取层参数
     feat_extract_layers = tuple(int(x.strip()) for x in args.feat_extract_layers.split(','))
     feat_extract_cascade = [int(x.strip()) for x in args.feat_extract_cascade.split(',')]
+    feat_extract_layer_type = tuple(x.strip() for x in args.feat_extract_layer_type.split(','))
 
     for iter, data in enumerate(tqdm(data_loader)):
 
@@ -207,7 +218,8 @@ def train_epoch(args, epoch, model, data_loader, optimizer, scheduler, writer,
             # 提取训练分支特征
             output, features_train = extract_unet_features(
                 model, us_input_high, input_kspace_high, mask_high,
-                cascade_idx=feat_extract_cascade, layer_indices=feat_extract_layers)
+                cascade_idx=feat_extract_cascade, layer_indices=feat_extract_layers,
+                layer_types=feat_extract_layer_type)
 
             # 生成低倍欠采样输入（参考分支）
             ref_acc_idx = [0] * target.shape[0]
@@ -222,12 +234,13 @@ def train_epoch(args, epoch, model, data_loader, optimizer, scheduler, writer,
             with torch.no_grad():
                 _, features_ref = extract_unet_features(
                     ref_model, us_input_ref, input_kspace_ref, mask_ref,
-                    cascade_idx=feat_extract_cascade, layer_indices=feat_extract_layers)
+                    cascade_idx=feat_extract_cascade, layer_indices=feat_extract_layers,
+                    layer_types=feat_extract_layer_type)
 
             # 计算复合损失
             loss_img = F.l1_loss(output, target)
             loss_feat = sum(
-                cosine_similarity_loss(features_train[key], features_ref[key], args.use_channel_pool)
+                attention_map_loss(features_train[key], features_ref[key])
                 for key in features_train
             )
             loss = loss_img + args.feat_loss_alpha * loss_feat
@@ -533,7 +546,7 @@ def main(args):
         optimizer, max_lr=args.lr,
         steps_per_epoch=len(train_loader),
         epochs=args.num_epochs,
-        pct_start=0.1
+        pct_start=0.05
     )
     # resume 时快速追赶 scheduler 到上次中断的位置
     if start_epoch > 0:
@@ -627,9 +640,8 @@ def create_arg_parser():
                         help='Comma-separated layer indices for feature extraction (e.g., "0,1,2" or "1,2")')
     parser.add_argument('--feat-extract-cascade', type=str, default='-1',
                         help='Comma-separated cascade indices for feature extraction (-1 for last cascade, e.g., "2,3,4")')
-    parser.add_argument('--use-channel-pool', action='store_true', default=False,
-                        help='Use channel-wise average pooling before computing cosine similarity loss')
-
+    parser.add_argument('--feat-extract-layer-type', type=str, default='up',
+                        help='Which UNet layers to extract features from: "up" (up_sample_layers), "down" (down_sample_layers), "conv" (bottleneck), or "both" (up+down)')
     return parser
 
 
