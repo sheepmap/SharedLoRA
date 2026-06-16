@@ -153,7 +153,6 @@ def extract_unet_features(model_dncn, x, k, m, cascade_idx=-1, layer_indices=(1,
     layer_map = {
         "up": lambda unet: unet.up_sample_layers,
         "down": lambda unet: unet.down_sample_layers,
-        "conv": lambda unet: [unet.conv],
     }
 
     # 注册 hook
@@ -166,6 +165,7 @@ def extract_unet_features(model_dncn, x, k, m, cascade_idx=-1, layer_indices=(1,
             target_layers = layer_map[lt](unet_model)
             for li in layer_indices:
                 if li >= len(target_layers):
+                    logging.warning(f'  layer_index {li} >= len({lt}_layers)={len(target_layers)}, skipping')
                     continue
                 def make_hook(cascade_id, layer_type, layer_id):
                     def hook_fn(module, inp, out):
@@ -641,7 +641,7 @@ def create_arg_parser():
     parser.add_argument('--feat-extract-cascade', type=str, default='-1',
                         help='Comma-separated cascade indices for feature extraction (-1 for last cascade, e.g., "2,3,4")')
     parser.add_argument('--feat-extract-layer-type', type=str, default='up',
-                        help='Which UNet layers to extract features from: "up" (up_sample_layers), "down" (down_sample_layers), "conv" (bottleneck), or "both" (up+down)')
+                        help='Which UNet layers to extract features from: "up" (up_sample_layers), "down" (down_sample_layers), or "both" (up+down)')
     return parser
 
 
