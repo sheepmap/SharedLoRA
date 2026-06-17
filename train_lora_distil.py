@@ -102,6 +102,27 @@ def gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, m
     return us_img.unsqueeze(1), torch.view_as_real(us_kspace), mask
 
 
+def flip_aug(us_input, input_kspace, mask, target=None):
+    """水平翻转 (W维) 所有输入张量，返回翻转后的副本。"""
+    us_flip = torch.flip(us_input, [-1])
+    ks_flip = torch.flip(input_kspace, [-2])  # kspace: [B,H,W,2]
+    mask_flip = torch.flip(mask, [-1])
+    tgt_flip = torch.flip(target, [-1]) if target is not None else None
+    return us_flip, ks_flip, mask_flip, tgt_flip
+
+
+def multi_scale_distil_loss(output, output_ref):
+    """计算三个尺度(0.5x, 1x, 2x)的蒸馏L1 loss并取平均。"""
+    loss_orig = F.l1_loss(output, output_ref)
+    output_half = F.interpolate(output, scale_factor=0.5, mode='bilinear', align_corners=False, antialias=True)
+    ref_half = F.interpolate(output_ref, scale_factor=0.5, mode='bilinear', align_corners=False, antialias=True)
+    loss_half = F.l1_loss(output_half, ref_half)
+    output_double = F.interpolate(output, scale_factor=2.0, mode='bilinear', align_corners=False)
+    ref_double = F.interpolate(output_ref, scale_factor=2.0, mode='bilinear', align_corners=False)
+    loss_double = F.l1_loss(output_double, ref_double)
+    return (loss_orig + loss_half + loss_double) / 3
+
+
 def train_epoch(args, epoch, model, data_loader, optimizer, scheduler, writer,
                 mask_bank, acc_factors, mask_types, dataset_types,
                 ref_model=None, mask_bank_ref=None):
@@ -127,11 +148,11 @@ def train_epoch(args, epoch, model, data_loader, optimizer, scheduler, writer,
         input_kspace_high = input_kspace_high.squeeze(1).float()
         target = target.float()
 
+        n_passes = 2 if args.aug_flip else 1
+        optimizer.zero_grad()
+
         # --- 蒸馏训练 ---
         if ref_model is not None and mask_bank_ref is not None and args.distil_alpha > 0:
-            # 主干前向传播（带LoRA）
-            output = model(us_input_high, input_kspace_high, mask_high)
-
             # 生成低倍欠采样输入（参考分支）
             ref_acc_idx = [0] * target.shape[0]
             us_input_ref, input_kspace_ref, mask_ref = gpu_undersample(
@@ -141,26 +162,57 @@ def train_epoch(args, epoch, model, data_loader, optimizer, scheduler, writer,
             us_input_ref = us_input_ref.squeeze(1).float()
             input_kspace_ref = input_kspace_ref.squeeze(1).float()
 
-            # 参考分支前向传播（冻结，无梯度）
+            # === Pass 1: 原始数据 ===
+            output = model(us_input_high, input_kspace_high, mask_high)
             with torch.no_grad():
                 output_ref = ref_model(us_input_ref, input_kspace_ref, mask_ref)
-
-            # 计算损失
             loss_img = F.l1_loss(output, target)
-            loss_distil = F.l1_loss(output, output_ref)
-            loss = loss_img + args.distil_alpha * loss_distil
+            loss_distil = multi_scale_distil_loss(output, output_ref) if args.distil_multi_scale else F.l1_loss(output, output_ref)
+            loss = (loss_img + args.distil_alpha * loss_distil) / n_passes
+            loss.backward()
+            del output, output_ref
+
+            # === Pass 2: 翻转数据 (仅当 args.aug_flip=True) ===
+            if args.aug_flip:
+                us_high_f, ks_high_f, mask_high_f, target_f = flip_aug(
+                    us_input_high, input_kspace_high, mask_high, target)
+                us_ref_f, ks_ref_f, mask_ref_f, _ = flip_aug(
+                    us_input_ref, input_kspace_ref, mask_ref)
+
+                output_f = model(us_high_f, ks_high_f, mask_high_f)
+                with torch.no_grad():
+                    output_ref_f = ref_model(us_ref_f, ks_ref_f, mask_ref_f)
+                loss_img_f = F.l1_loss(output_f, target_f)
+                loss_distil_f = multi_scale_distil_loss(output_f, output_ref_f) if args.distil_multi_scale else F.l1_loss(output_f, output_ref_f)
+                loss_f = (loss_img_f + args.distil_alpha * loss_distil_f) / n_passes
+                loss_f.backward()
+                del output_f, output_ref_f, us_high_f, ks_high_f, mask_high_f, target_f, us_ref_f, ks_ref_f, mask_ref_f
+
+                loss = loss + loss_f
+                loss_img = loss_img + loss_img_f
+                loss_distil = loss_distil + loss_distil_f
 
             if iter % args.report_interval == 0:
                 logging.info(
                     f'  L_img={loss_img.item():.4g} L_distil={loss_distil.item():.4g} '
                     f'alpha*L_distil={args.distil_alpha * loss_distil.item():.4g}')
         else:
-            # 原始训练路径（无蒸馏）
+            # === Pass 1: 原始数据 (无蒸馏) ===
             output = model(us_input_high, input_kspace_high, mask_high)
-            loss = F.l1_loss(output, target)
+            loss = F.l1_loss(output, target) / n_passes
+            loss.backward()
+            del output
 
-        optimizer.zero_grad()
-        loss.backward()
+            # === Pass 2: 翻转数据 (仅当 args.aug_flip=True) ===
+            if args.aug_flip:
+                us_high_f, ks_high_f, mask_high_f, target_f = flip_aug(
+                    us_input_high, input_kspace_high, mask_high, target)
+                output_f = model(us_high_f, ks_high_f, mask_high_f)
+                loss_f = F.l1_loss(output_f, target_f) / n_passes
+                loss_f.backward()
+                del output_f, us_high_f, ks_high_f, mask_high_f, target_f
+                loss = loss + loss_f
+
         optimizer.step()
         scheduler.step()
 
@@ -402,7 +454,7 @@ def load_model(checkpoint_file):
     # Load lora adapter (same directory as checkpoint.pt)
     adapter_path = pathlib.Path(checkpoint_file).parent / 'adapter.pt'
     lora_state = torch.load(adapter_path)
-    model.load_state_dict(lora_state, strict=True)
+    model.load_state_dict(lora_state, strict=False)
 
     optimizer = build_optim(args, model.parameters())
     optimizer.load_state_dict(checkpoint['optimizer'])
@@ -541,6 +593,10 @@ def create_arg_parser():
                         help='Weight for distillation loss (L1 between main and ref output, 0 to disable)')
     parser.add_argument('--ref-acceleration-factor', type=str, default='4x',
                         help='Acceleration factor for the reference branch (低倍, e.g., 4x)')
+    parser.add_argument('--aug-flip', action='store_true', default=False,
+                        help='If set, augment data by flipping: doubles effective batch with two forward/backward passes')
+    parser.add_argument('--distil-multi-scale', action='store_true', default=False,
+                        help='If set, compute distillation loss at 3 scales (0.5x, 1x, 2x) and average')
     return parser
 
 
