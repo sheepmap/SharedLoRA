@@ -6,6 +6,7 @@ import shutil
 import time
 import functools
 import numpy as np
+import cv2
 import argparse
 import os
 import torch
@@ -102,13 +103,48 @@ def gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, m
     return us_img.unsqueeze(1), torch.view_as_real(us_kspace), mask
 
 
-def flip_aug(us_input, input_kspace, mask, target=None):
-    """水平翻转 (W维) 所有输入张量，返回翻转后的副本。"""
-    us_flip = torch.flip(us_input, [-1])
-    ks_flip = torch.flip(input_kspace, [-2])  # kspace: [B,H,W,2]
-    mask_flip = torch.flip(mask, [-1])
-    tgt_flip = torch.flip(target, [-1]) if target is not None else None
-    return us_flip, ks_flip, mask_flip, tgt_flip
+def gaussian_noise_aug(us_input, sigma):
+    """使用 OpenCV 对 us_input 添加高斯噪声。
+
+    将每个样本归一化到 [0, 255] 浮点范围，通过 cv2.randn 添加 N(0, sigma) 噪声，
+    裁剪到 [0, 255] 防止 uint8 溢出回绕，再反归一化回原始浮点范围。
+
+    Args:
+        us_input: [B, H, W] float32 GPU 张量
+        sigma: 高斯噪声标准差（uint8 尺度，如 25 或 50）
+
+    Returns:
+        与 us_input 同形状、同 dtype 的含噪张量
+    """
+    B, H, W = us_input.shape
+    noisy = torch.empty_like(us_input)
+
+    for i in range(B):
+        sample = us_input[i].detach().cpu().numpy()
+        s_min = sample.min()
+        s_max = sample.max()
+        data_range = s_max - s_min
+
+        if data_range < 1e-8:
+            noisy[i] = us_input[i]
+            continue
+
+        # 归一化到 [0, 255] 浮点（非 uint8，避免回绕）
+        sample_255 = (sample - s_min) / data_range * 255.0
+
+        # 使用 OpenCV 生成高斯噪声
+        noise = np.zeros_like(sample_255, dtype=np.float32)
+        cv2.randn(noise, 0, sigma)
+
+        # 添加噪声并裁剪到 [0, 255]，防止溢出
+        noisy_255 = np.clip(sample_255 + noise, 0.0, 255.0)
+
+        # 反归一化回原始范围
+        noisy_sample = noisy_255 / 255.0 * data_range + s_min
+
+        noisy[i] = torch.from_numpy(noisy_sample).to(us_input.device)
+
+    return noisy
 
 
 def multi_scale_distil_loss(output, output_ref):
@@ -148,7 +184,6 @@ def train_epoch(args, epoch, model, data_loader, optimizer, scheduler, writer,
         input_kspace_high = input_kspace_high.squeeze(1).float()
         target = target.float()
 
-        n_passes = 2 if args.aug_flip else 1
         optimizer.zero_grad()
 
         # --- 蒸馏训练 ---
@@ -168,29 +203,38 @@ def train_epoch(args, epoch, model, data_loader, optimizer, scheduler, writer,
                 output_ref = ref_model(us_input_ref, input_kspace_ref, mask_ref)
             loss_img = F.l1_loss(output, target)
             loss_distil = multi_scale_distil_loss(output, output_ref) if args.distil_multi_scale else F.l1_loss(output, output_ref)
-            loss = (loss_img + args.distil_alpha * loss_distil) / n_passes
+            loss = 0.5 * (loss_img + args.distil_alpha * loss_distil) if args.aug_flip else (loss_img + args.distil_alpha * loss_distil)
             loss.backward()
             del output, output_ref
 
-            # === Pass 2: 翻转数据 (仅当 args.aug_flip=True) ===
+            # === Pass 2: 轻度噪声增广 (仅当 args.aug_flip=True) ===
             if args.aug_flip:
-                us_high_f, ks_high_f, mask_high_f, target_f = flip_aug(
-                    us_input_high, input_kspace_high, mask_high, target)
-                us_ref_f, ks_ref_f, mask_ref_f, _ = flip_aug(
-                    us_input_ref, input_kspace_ref, mask_ref)
-
-                output_f = model(us_high_f, ks_high_f, mask_high_f)
+                sigma_25 = random.uniform(15, 35)
+                us_noisy_25 = gaussian_noise_aug(us_input_high, sigma=sigma_25)
+                output_n25 = model(us_noisy_25, input_kspace_high, mask_high)
                 with torch.no_grad():
-                    output_ref_f = ref_model(us_ref_f, ks_ref_f, mask_ref_f)
-                loss_img_f = F.l1_loss(output_f, target_f)
-                loss_distil_f = multi_scale_distil_loss(output_f, output_ref_f) if args.distil_multi_scale else F.l1_loss(output_f, output_ref_f)
-                loss_f = (loss_img_f + args.distil_alpha * loss_distil_f) / n_passes
-                loss_f.backward()
-                del output_f, output_ref_f, us_high_f, ks_high_f, mask_high_f, target_f, us_ref_f, ks_ref_f, mask_ref_f
+                    output_ref_n25 = ref_model(us_input_ref, input_kspace_ref, mask_ref)
+                loss_img_n25 = F.l1_loss(output_n25, target)
+                loss_distil_n25 = multi_scale_distil_loss(output_n25, output_ref_n25) if args.distil_multi_scale else F.l1_loss(output_n25, output_ref_n25)
+                loss_n25 = 0.25 * (loss_img_n25 + args.distil_alpha * loss_distil_n25)
+                loss_n25.backward()
+                del output_n25, output_ref_n25, us_noisy_25
 
-                loss = loss + loss_f
-                loss_img = loss_img + loss_img_f
-                loss_distil = loss_distil + loss_distil_f
+                # === Pass 3: 重度噪声增广 ===
+                sigma_50 = random.uniform(40, 60)
+                us_noisy_50 = gaussian_noise_aug(us_input_high, sigma=sigma_50)
+                output_n50 = model(us_noisy_50, input_kspace_high, mask_high)
+                with torch.no_grad():
+                    output_ref_n50 = ref_model(us_input_ref, input_kspace_ref, mask_ref)
+                loss_img_n50 = F.l1_loss(output_n50, target)
+                loss_distil_n50 = multi_scale_distil_loss(output_n50, output_ref_n50) if args.distil_multi_scale else F.l1_loss(output_n50, output_ref_n50)
+                loss_n50 = 0.25 * (loss_img_n50 + args.distil_alpha * loss_distil_n50)
+                loss_n50.backward()
+                del output_n50, output_ref_n50, us_noisy_50
+
+                loss = loss + loss_n25 + loss_n50
+                loss_img = loss_img + loss_img_n25 + loss_img_n50
+                loss_distil = loss_distil + loss_distil_n25 + loss_distil_n50
 
             if iter % args.report_interval == 0:
                 logging.info(
@@ -199,19 +243,28 @@ def train_epoch(args, epoch, model, data_loader, optimizer, scheduler, writer,
         else:
             # === Pass 1: 原始数据 (无蒸馏) ===
             output = model(us_input_high, input_kspace_high, mask_high)
-            loss = F.l1_loss(output, target) / n_passes
+            loss = 0.5 * F.l1_loss(output, target) if args.aug_flip else F.l1_loss(output, target)
             loss.backward()
             del output
 
-            # === Pass 2: 翻转数据 (仅当 args.aug_flip=True) ===
+            # === Pass 2: 轻度噪声增广 (仅当 args.aug_flip=True) ===
             if args.aug_flip:
-                us_high_f, ks_high_f, mask_high_f, target_f = flip_aug(
-                    us_input_high, input_kspace_high, mask_high, target)
-                output_f = model(us_high_f, ks_high_f, mask_high_f)
-                loss_f = F.l1_loss(output_f, target_f) / n_passes
-                loss_f.backward()
-                del output_f, us_high_f, ks_high_f, mask_high_f, target_f
-                loss = loss + loss_f
+                sigma_25 = random.uniform(15, 35)
+                us_noisy_25 = gaussian_noise_aug(us_input_high, sigma=sigma_25)
+                output_n25 = model(us_noisy_25, input_kspace_high, mask_high)
+                loss_n25 = 0.25 * F.l1_loss(output_n25, target)
+                loss_n25.backward()
+                del output_n25, us_noisy_25
+
+                # === Pass 3: 重度噪声增广 ===
+                sigma_50 = random.uniform(40, 60)
+                us_noisy_50 = gaussian_noise_aug(us_input_high, sigma=sigma_50)
+                output_n50 = model(us_noisy_50, input_kspace_high, mask_high)
+                loss_n50 = 0.25 * F.l1_loss(output_n50, target)
+                loss_n50.backward()
+                del output_n50, us_noisy_50
+
+                loss = loss + loss_n25 + loss_n50
 
         optimizer.step()
         scheduler.step()
@@ -594,7 +647,7 @@ def create_arg_parser():
     parser.add_argument('--ref-acceleration-factor', type=str, default='4x',
                         help='Acceleration factor for the reference branch (低倍, e.g., 4x)')
     parser.add_argument('--aug-flip', action='store_true', default=False,
-                        help='If set, augment data by flipping: doubles effective batch with two forward/backward passes')
+                        help='If set, augment data with Gaussian noise (sigma=25, sigma=50): triples effective batch with three forward/backward passes')
     parser.add_argument('--distil-multi-scale', action='store_true', default=False,
                         help='If set, compute distillation loss at 3 scales (0.5x, 1x, 2x) and average')
     return parser

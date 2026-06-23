@@ -25,7 +25,7 @@ DISTIL_ALPHA=0.1             # 蒸馏损失权重，设为 0 禁用
 REF_ACC_FACTOR='4x'          # 参考分支的低倍欠采样倍数
 
 # Data augmentation settings
-AUG_FLIP=true                # 翻转增广开关，true 为启用
+AUG_FLIP=true                # 高斯噪声增广开关（sigma=25/50），true 为启用
 DISTIL_MULTI_SCALE=true      # 多尺度蒸馏损失开关，true 为启用
 
 $AUG_FLIP && AUG_FLIP_ARG="--aug-flip" || AUG_FLIP_ARG=""

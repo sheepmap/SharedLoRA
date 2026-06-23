@@ -497,7 +497,7 @@ def load_model(checkpoint_file):
     # Load lora adapter (same directory as checkpoint.pt)
     adapter_path = pathlib.Path(checkpoint_file).parent / 'adapter.pt'
     lora_state = torch.load(adapter_path)
-    model.load_state_dict(lora_state, strict=True)
+    model.load_state_dict(lora_state, strict=False)
 
     optimizer = build_optim(args, model.parameters())
     optimizer.load_state_dict(checkpoint['optimizer'])
