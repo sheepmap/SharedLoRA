@@ -110,16 +110,23 @@ def gaussian_noise_aug(us_input, sigma):
     裁剪到 [0, 255] 防止 uint8 溢出回绕，再反归一化回原始浮点范围。
 
     Args:
-        us_input: [B, H, W] float32 GPU 张量
+        us_input: [B, H, W] 或 [B, C, H, W] float32 GPU 张量
         sigma: 高斯噪声标准差（uint8 尺度，如 25 或 50）
 
     Returns:
         与 us_input 同形状、同 dtype 的含噪张量
     """
-    B, H, W = us_input.shape
+    orig_shape = us_input.shape
+    # 统一为 3D [B, H, W] 处理
+    if us_input.dim() == 4:
+        B, C, H, W = us_input.shape
+        us_input = us_input.view(B * C, H, W)
+    else:
+        B = us_input.shape[0]
+
     noisy = torch.empty_like(us_input)
 
-    for i in range(B):
+    for i in range(us_input.shape[0]):
         sample = us_input[i].detach().cpu().numpy()
         s_min = sample.min()
         s_max = sample.max()
@@ -144,7 +151,7 @@ def gaussian_noise_aug(us_input, sigma):
 
         noisy[i] = torch.from_numpy(noisy_sample).to(us_input.device)
 
-    return noisy
+    return noisy.view(orig_shape)
 
 
 def multi_scale_distil_loss(output, output_ref):
