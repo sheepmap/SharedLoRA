@@ -166,6 +166,27 @@ def multi_scale_distil_loss(output, output_ref):
     return (loss_orig + loss_half + loss_double) / 3
 
 
+def hpf_map(x, kernel_size=5):
+    """High-pass map used by residual distillation: image minus local average."""
+    pad = kernel_size // 2
+    low = F.avg_pool2d(x, kernel_size=kernel_size, stride=1, padding=pad)
+    return x - low
+
+
+def residual_bridge_distil_loss(output, output_base, output_ref, target, use_multi_scale=False):
+    """L1(W * HPF(S_R - B_R), W * HPF(T_4 - B_R))."""
+    with torch.no_grad():
+        err_ref = torch.abs(output_ref - target)
+        err_base = torch.abs(output_base - target)
+        weight = torch.clamp((err_base - err_ref) / (err_base + 1e-6), min=0.0, max=1.0)
+        teacher_residual = weight * hpf_map(output_ref - output_base)
+
+    student_residual = weight * hpf_map(output - output_base.detach())
+    if use_multi_scale:
+        return multi_scale_distil_loss(student_residual, teacher_residual)
+    return F.l1_loss(student_residual, teacher_residual)
+
+
 def train_epoch(args, epoch, model, data_loader, optimizer, scheduler, writer,
                 mask_bank, acc_factors, mask_types, dataset_types,
                 ref_model=None, mask_bank_ref=None):
@@ -207,12 +228,15 @@ def train_epoch(args, epoch, model, data_loader, optimizer, scheduler, writer,
             # === Pass 1: 原始数据 ===
             output = model(us_input_high, input_kspace_high, mask_high)
             with torch.no_grad():
+                output_base = ref_model(us_input_high, input_kspace_high, mask_high)
                 output_ref = ref_model(us_input_ref, input_kspace_ref, mask_ref)
             loss_img = F.l1_loss(output, target)
-            loss_distil = multi_scale_distil_loss(output, output_ref) if args.distil_multi_scale else F.l1_loss(output, output_ref)
+            loss_distil = residual_bridge_distil_loss(
+                output, output_base, output_ref, target,
+                use_multi_scale=args.distil_multi_scale)
             loss = 0.5 * (loss_img + args.distil_alpha * loss_distil) if args.aug_flip else (loss_img + args.distil_alpha * loss_distil)
             loss.backward()
-            del output, output_ref
+            del output, output_base, output_ref
 
             # === Pass 2: 轻度噪声增广 (仅当 args.aug_flip=True) ===
             if args.aug_flip:
@@ -220,24 +244,30 @@ def train_epoch(args, epoch, model, data_loader, optimizer, scheduler, writer,
                 us_noisy_25 = gaussian_noise_aug(us_input_high, sigma=sigma_25)
                 output_n25 = model(us_noisy_25, input_kspace_high, mask_high)
                 with torch.no_grad():
+                    output_base_n25 = ref_model(us_noisy_25, input_kspace_high, mask_high)
                     output_ref_n25 = ref_model(us_input_ref, input_kspace_ref, mask_ref)
                 loss_img_n25 = F.l1_loss(output_n25, target)
-                loss_distil_n25 = multi_scale_distil_loss(output_n25, output_ref_n25) if args.distil_multi_scale else F.l1_loss(output_n25, output_ref_n25)
+                loss_distil_n25 = residual_bridge_distil_loss(
+                    output_n25, output_base_n25, output_ref_n25, target,
+                    use_multi_scale=args.distil_multi_scale)
                 loss_n25 = 0.25 * (loss_img_n25 + args.distil_alpha * loss_distil_n25)
                 loss_n25.backward()
-                del output_n25, output_ref_n25, us_noisy_25
+                del output_n25, output_base_n25, output_ref_n25, us_noisy_25
 
                 # === Pass 3: 重度噪声增广 ===
                 sigma_50 = random.uniform(40, 60)
                 us_noisy_50 = gaussian_noise_aug(us_input_high, sigma=sigma_50)
                 output_n50 = model(us_noisy_50, input_kspace_high, mask_high)
                 with torch.no_grad():
+                    output_base_n50 = ref_model(us_noisy_50, input_kspace_high, mask_high)
                     output_ref_n50 = ref_model(us_input_ref, input_kspace_ref, mask_ref)
                 loss_img_n50 = F.l1_loss(output_n50, target)
-                loss_distil_n50 = multi_scale_distil_loss(output_n50, output_ref_n50) if args.distil_multi_scale else F.l1_loss(output_n50, output_ref_n50)
+                loss_distil_n50 = residual_bridge_distil_loss(
+                    output_n50, output_base_n50, output_ref_n50, target,
+                    use_multi_scale=args.distil_multi_scale)
                 loss_n50 = 0.25 * (loss_img_n50 + args.distil_alpha * loss_distil_n50)
                 loss_n50.backward()
-                del output_n50, output_ref_n50, us_noisy_50
+                del output_n50, output_base_n50, output_ref_n50, us_noisy_50
 
                 loss = loss + loss_n25 + loss_n50
                 loss_img = loss_img + loss_img_n25 + loss_img_n50
