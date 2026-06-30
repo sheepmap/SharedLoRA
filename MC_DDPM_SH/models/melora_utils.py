@@ -222,9 +222,9 @@ def apply_melora_to_model(
                 continue
 
         # skip if channels not divisible by l_num. For single-channel input
-        # layers, collapse hierarchical ranks into one MELoRA branch so the
-        # first encoder conv can still receive an adapter without changing the
-        # frozen base conv shape.
+        # layers, fall back to a single branch whose rank matches the
+        # MELoRA-equivalent ConvLoRA rank, i.e. the average rank across
+        # branches, so parameter count stays fair to the multi-branch setting.
         l_num = len(r)
         effective_r = r
         effective_alpha = lora_alpha
@@ -235,8 +235,8 @@ def apply_melora_to_model(
                 and len(r) > 1
             )
             if can_collapse:
-                effective_r = [sum(r)]
-                effective_alpha = [sum(lora_alpha)]
+                effective_r = [sum(r) // len(r)]
+                effective_alpha = [sum(lora_alpha) // len(lora_alpha)]
                 if verbose:
                     print(f"[MELoRA] COLLAPSE {name}: in={module.in_channels}, "
                           f"out={module.out_channels}, r={r}->{effective_r}, "
