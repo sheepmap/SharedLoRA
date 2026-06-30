@@ -221,14 +221,32 @@ def apply_melora_to_model(
             if not any(tgt in name for tgt in target_module_names):
                 continue
 
-        # skip if channels not divisible by l_num
+        # skip if channels not divisible by l_num. For single-channel input
+        # layers, collapse hierarchical ranks into one MELoRA branch so the
+        # first encoder conv can still receive an adapter without changing the
+        # frozen base conv shape.
         l_num = len(r)
+        effective_r = r
+        effective_alpha = lora_alpha
         if module.in_channels % l_num != 0 or module.out_channels % l_num != 0:
-            if verbose:
-                print(f"[MELoRA] SKIP {name}: in={module.in_channels}, out={module.out_channels} "
-                      f"not divisible by l_num={l_num}")
-            n_skipped += 1
-            continue
+            can_collapse = (
+                module.in_channels < l_num
+                and module.out_channels % 1 == 0
+                and len(r) > 1
+            )
+            if can_collapse:
+                effective_r = [sum(r)]
+                effective_alpha = [sum(lora_alpha)]
+                if verbose:
+                    print(f"[MELoRA] COLLAPSE {name}: in={module.in_channels}, "
+                          f"out={module.out_channels}, r={r}->{effective_r}, "
+                          f"alpha={lora_alpha}->{effective_alpha}")
+            else:
+                if verbose:
+                    print(f"[MELoRA] SKIP {name}: in={module.in_channels}, out={module.out_channels} "
+                          f"not divisible by l_num={l_num}")
+                n_skipped += 1
+                continue
 
         # get parent and attribute name to replace
         parent_name = name.rsplit(".", 1)
@@ -240,13 +258,13 @@ def apply_melora_to_model(
             parent = model
             attr = name
 
-        melora_conv = MELoRAConv2d(module, r, lora_alpha, lora_dropout)
+        melora_conv = MELoRAConv2d(module, effective_r, effective_alpha, lora_dropout)
         setattr(parent, attr, melora_conv)
         n_replaced += 1
 
         if verbose:
             print(f"[MELoRA] REPLACE {name}: in={module.in_channels}, "
-                  f"out={module.out_channels}, r={r}")
+                  f"out={module.out_channels}, r={effective_r}")
 
     if verbose:
         print(f"[MELoRA] Summary: total nn.Conv2d={n_total}, replaced={n_replaced}, "

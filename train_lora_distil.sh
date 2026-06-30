@@ -17,7 +17,7 @@ USMASK_PATH=${BASE_PATH}'/usmasks/'
 MELORA_R="8,8"
 MELORA_ALPHA="16,16"
 MELORA_DROPOUT=0.05
-MELORA_TARGET="up_sample_layers"
+MELORA_TARGET="down_sample_layers.0,up_sample_layers"
 #ffn.project_out,ffn.project_in,ffn.dwconv,
 
 # Distillation settings
