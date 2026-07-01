@@ -81,6 +81,8 @@ class MELoRAConv2d(nn.Module):
                 self.scaling.append(0.0)
 
         self.disable_adapters = False
+        self.gate_index = None
+        self.current_gate = None
 
     def forward(self, x):
         result = self.conv(x)
@@ -102,7 +104,11 @@ class MELoRAConv2d(nn.Module):
                 )
 
         if temp:
-            result = result + torch.cat(temp, dim=1)
+            delta = torch.cat(temp, dim=1)
+            if self.current_gate is not None:
+                gate = self.current_gate.to(device=delta.device, dtype=delta.dtype)
+                delta = delta * gate
+            result = result + delta
 
         return result
 
@@ -286,6 +292,33 @@ def set_melora_trainable(model: nn.Module) -> int:
         else:
             param.requires_grad = False
     return trainable_count
+
+
+def get_melora_layers(model: nn.Module) -> List[MELoRAConv2d]:
+    """Return MELoRA layers in module traversal order."""
+    return [module for module in model.modules() if isinstance(module, MELoRAConv2d)]
+
+
+def assign_melora_gate_indices(model: nn.Module) -> int:
+    """Assign each MELoRA layer a stable column index in the gate vector."""
+    layers = get_melora_layers(model)
+    for idx, layer in enumerate(layers):
+        layer.gate_index = idx
+    return len(layers)
+
+
+def set_melora_gates(model: nn.Module, gates: torch.Tensor) -> None:
+    """Attach sample-wise gates [B, n_lora] to MELoRA layers for forward."""
+    for layer in get_melora_layers(model):
+        if layer.gate_index is None:
+            raise RuntimeError("MELoRA gate indices have not been assigned")
+        layer.current_gate = gates[:, layer.gate_index].view(-1, 1, 1, 1)
+
+
+def clear_melora_gates(model: nn.Module) -> None:
+    """Clear gates so MELoRA layers use the standard ungated forward."""
+    for layer in get_melora_layers(model):
+        layer.current_gate = None
 
 
 def get_melora_state_dict(model: nn.Module) -> dict:

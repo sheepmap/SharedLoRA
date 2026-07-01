@@ -15,7 +15,13 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from dataset import SliceData,SliceDisplayDataDev
 from models import DnCn
-from MC_DDPM_SH.models.melora_utils import apply_melora_to_model, set_melora_trainable
+from MC_DDPM_SH.models.melora_utils import (
+    apply_melora_to_model,
+    assign_melora_gate_indices,
+    clear_melora_gates,
+    set_melora_gates,
+    set_melora_trainable,
+)
 import torchvision
 from torch import nn
 from torch.autograd import Variable
@@ -24,6 +30,47 @@ from tqdm import tqdm
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class LoRAGateNet(nn.Module):
+    """Predict sample-wise LoRA gates [B, n_lora] from undersampled images."""
+
+    def __init__(self, n_lora):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d(1),
+        )
+        self.proj = nn.Linear(64, n_lora)
+        nn.init.zeros_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
+
+    def forward(self, x):
+        feat = self.encoder(x).flatten(1)
+        return 2.0 * torch.sigmoid(self.proj(feat))
+
+
+def _inner_model(model):
+    return model.module if hasattr(model, 'module') else model
+
+
+def forward_with_lora_gates(model, us_input, input_kspace, mask):
+    inner = _inner_model(model)
+    if not hasattr(inner, 'lora_gate_net'):
+        return model(us_input, input_kspace, mask), None
+
+    gates = inner.lora_gate_net(us_input)
+    set_melora_gates(model, gates)
+    try:
+        output = model(us_input, input_kspace, mask)
+    finally:
+        clear_melora_gates(model)
+    return output, gates
 
 def create_datasets(args):
 
@@ -126,7 +173,7 @@ def train_epoch(args, epoch, model, data_loader, optimizer, scheduler, writer,
         target = target.float()
 
         optimizer.zero_grad()
-        output = model(us_input_high, input_kspace_high, mask_high)
+        output, gates = forward_with_lora_gates(model, us_input_high, input_kspace_high, mask_high)
         loss = F.l1_loss(output, target)
         loss.backward()
         del output
@@ -136,12 +183,16 @@ def train_epoch(args, epoch, model, data_loader, optimizer, scheduler, writer,
 
         avg_loss = 0.99 * avg_loss + 0.01 * loss.item() if iter > 0 else loss.item()
         writer.add_scalar('TrainLoss', loss.item(), global_step + iter)
+        if gates is not None:
+            writer.add_scalar('TrainGateMean', gates.detach().mean().item(), global_step + iter)
 
         if iter % args.report_interval == 0:
+            gate_log = f' GateMean = {gates.detach().mean().item():.4g}' if gates is not None else ''
             logging.info(
                 f'Epoch = [{epoch:3d}/{args.num_epochs:3d}] '
                 f'Iter = [{iter:4d}/{len(data_loader):4d}] '
                 f'L1 Loss = {loss.item():.4g} Avg Loss = {avg_loss:.4g} '
+                f'{gate_log}'
                 f'Time = {time.perf_counter() - start_iter:.4f}s',
             )
         start_iter = time.perf_counter()
@@ -167,7 +218,7 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
             input_kspace = input_kspace.squeeze(1).float()  # [B, 1, H, W, 2] -> [B, H, W, 2]
             target = target.float()
 
-            output = model(us_input,input_kspace,mask)
+            output, _ = forward_with_lora_gates(model, us_input, input_kspace, mask)
 
             loss = F.mse_loss(output,target)
             losses.append(loss.item())
@@ -222,7 +273,7 @@ def visualize(args, epoch, model, data_loader, writer, datasettype_string, mask_
 
             us_input = us_input.float()
             target = target.float()
-            output = model(us_input,input_kspace,mask)
+            output, _ = forward_with_lora_gates(model, us_input, input_kspace, mask)
 
             save_image(us_input, 'Input_{}'.format(datasettype_string))
             save_image(target, 'Target_{}'.format(datasettype_string))
@@ -237,8 +288,9 @@ def _make_melora_dirname(args):
     return f'r{r_str}_{target_str}'
 
 def save_model(args, save_dir, epoch, model, optimizer, scheduler, best_psnr, is_new_best):
-    """Save LoRA adapter + training metadata to save_dir. No base weights (they don't change)."""
-    lora_state = {k: v for k, v in model.state_dict().items() if 'lora_' in k}
+    """Save LoRA adapter, gate net, and training metadata. No base weights."""
+    lora_state = {k: v for k, v in model.state_dict().items()
+                  if 'lora_' in k or 'lora_gate_net' in k}
 
     # Checkpoint: training metadata only, for resume
     torch.save(
@@ -252,7 +304,7 @@ def save_model(args, save_dir, epoch, model, optimizer, scheduler, best_psnr, is
         f=save_dir / 'checkpoint.pt'
     )
 
-    # Adapter: LoRA weights only
+    # Adapter: LoRA and gate-net weights only
     torch.save(lora_state, f=save_dir / 'adapter.pt')
 
     if is_new_best:
@@ -281,8 +333,14 @@ def build_model_from_pretrained(args):
                           target_module_names=target,
                           verbose=True)
 
+    n_lora = assign_melora_gate_indices(model)
+    model.lora_gate_net = LoRAGateNet(n_lora).to(args.device)
+    logger.info(f"LoRA gate net enabled: n_lora={n_lora}")
+
     # Freeze base, only lora trainable
     trainable_count = set_melora_trainable(model)
+    for param in model.lora_gate_net.parameters():
+        param.requires_grad = True
 
     # Verify and report which params are trainable
     total_count = sum(p.numel() for p in model.parameters())
@@ -328,7 +386,11 @@ def load_model(checkpoint_file):
                           lora_dropout=args.melora_dropout,
                           target_module_names=target,
                           verbose=True)
+    n_lora = assign_melora_gate_indices(model)
+    model.lora_gate_net = LoRAGateNet(n_lora).to(args.device)
     set_melora_trainable(model)
+    for param in model.lora_gate_net.parameters():
+        param.requires_grad = True
 
     if args.data_parallel:
         model = torch.nn.DataParallel(model)
