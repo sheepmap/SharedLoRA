@@ -37,6 +37,7 @@ def preprocess_dataset(dataset_type, input_dir, mask_type='cartesian'):
         acc_factors=ACC_FACTORS_EVAL,
         mask_base_path=MASK_BASE_PATH,
         splits=('validation', 'test'),
+        merge_eval_acc_factors=True,
     )
 
 

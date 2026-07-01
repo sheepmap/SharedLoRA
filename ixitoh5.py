@@ -27,7 +27,10 @@ def preprocess_ixi_to_h5(
     volume = (volume - volume.min()) / (volume.max() - volume.min())
     h, w, num_slices = volume.shape
 
-    with h5py.File(output_path, 'w') as f:
+    file_mode = 'a' if split != 'train' and os.path.exists(output_path) else 'w'
+    with h5py.File(output_path, file_mode) as f:
+        if 'volfs' in f:
+            del f['volfs']
         f.create_dataset('volfs', data=volume.astype(np.float32))
 
         if split == 'train':
@@ -61,8 +64,14 @@ def preprocess_ixi_to_h5(
             img_volus[:, :, i] = us_img
             kspace_volus[:, :, i] = us_kspace
 
-        f.create_dataset(f'img_volus_{acc_str}', data=img_volus.astype(np.float32))
-        f.create_dataset(f'kspace_volus_{acc_str}', data=kspace_volus.astype(np.complex64))
+        img_key = f'img_volus_{acc_str}'
+        kspace_key = f'kspace_volus_{acc_str}'
+        if img_key in f:
+            del f[img_key]
+        if kspace_key in f:
+            del f[kspace_key]
+        f.create_dataset(img_key, data=img_volus.astype(np.float32))
+        f.create_dataset(kspace_key, data=kspace_volus.astype(np.complex64))
         print(f'Saved undersampled data with {acc_factor}x acceleration using pre-generated {mask_type} mask')
 
 
@@ -86,6 +95,7 @@ def batch_preprocess(
     acc_factors=(4, 5, 8),
     mask_base_path=None,
     splits=('train', 'validation', 'test'),
+    merge_eval_acc_factors=False,
 ):
     """
     Batch preprocess IXI data.
@@ -113,14 +123,38 @@ def batch_preprocess(
         f"test: {len(split_to_files['test'])}"
     )
 
-    for acc in acc_factors:
-        acc_str = f'{acc}x'
-        print(f'\nProcessing {acc_str} acceleration...')
+    for split in splits:
+        split_label = 'Val' if split == 'validation' else split.capitalize()
+        split_acc_factors = list(acc_factors)
+        if split == 'train':
+            split_acc_factors = [acc_factors[0]]
 
-        for split in splits:
+        if merge_eval_acc_factors and split in ('validation', 'test'):
+            split_dir = os.path.join(output_dir, dataset_type, mask_type, split, 'multi_acc')
+            os.makedirs(split_dir, exist_ok=True)
+            print(f"\nProcessing {split} split with merged accelerations: {split_acc_factors}")
+
+            for fpath in split_to_files[split]:
+                fname = os.path.basename(fpath).replace('.nii.gz', '.h5')
+                output_path = os.path.join(split_dir, fname)
+                for acc in split_acc_factors:
+                    preprocess_ixi_to_h5(
+                        fpath,
+                        output_path,
+                        acc_factor=acc,
+                        mask_type=mask_type,
+                        mask_base_path=mask_base_path,
+                        dataset_type=dataset_type,
+                        split=split,
+                    )
+                print(f'  [{split_label}] Processed merged file: {output_path}')
+            continue
+
+        for acc in split_acc_factors:
+            acc_str = f'{acc}x'
+            print(f'\nProcessing {split} split at {acc_str} acceleration...')
             split_dir = os.path.join(output_dir, dataset_type, mask_type, split, f'acc_{acc_str}')
             os.makedirs(split_dir, exist_ok=True)
-            split_label = 'Val' if split == 'validation' else split.capitalize()
 
             for fpath in split_to_files[split]:
                 fname = os.path.basename(fpath).replace('.nii.gz', '.h5')

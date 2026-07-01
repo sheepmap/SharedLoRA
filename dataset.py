@@ -14,7 +14,7 @@ class SliceData(Dataset):
     """
 
     def __init__(self, root, acc_factors,dataset_types,mask_types,train_or_valid,mask_path,
-                 data_acceleration_factor=None): # acc_factor can be passed here and saved as self variable
+                 data_acceleration_factor=None, expand_acc_factors=True): # acc_factor can be passed here and saved as self variable
         #files = list(pathlib.Path(root).iterdir())
         self.examples = []
         self.mask_path = mask_path
@@ -26,7 +26,8 @@ class SliceData(Dataset):
             dataroot = os.path.join(root, dataset_type)
             for mask_type in mask_types:
                 newroot = os.path.join(dataroot, mask_type,train_or_valid)
-                for acc_factor in acc_factors:
+                example_acc_factors = acc_factors if expand_acc_factors else [acc_factors[0]]
+                for acc_factor in example_acc_factors:
                     read_acc_factor = data_acceleration_factor or acc_factor
                     acc_root = self._resolve_acc_root(newroot, read_acc_factor)
                     files = [f for f in pathlib.Path(acc_root).iterdir() if f.suffix == '.h5']
@@ -41,6 +42,10 @@ class SliceData(Dataset):
         requested_root = pathlib.Path(os.path.join(base_root, 'acc_{}'.format(acc_factor)))
         if requested_root.exists():
             return str(requested_root)
+
+        merged_root = pathlib.Path(os.path.join(base_root, 'multi_acc'))
+        if merged_root.exists():
+            return str(merged_root)
 
         fallback_16x = pathlib.Path(os.path.join(base_root, 'acc_16x'))
         if fallback_16x.exists():
@@ -123,8 +128,11 @@ class SliceDisplayDataDev(Dataset):
     """
 
     def __init__(self, root,dataset_type,mask_type,acc_factor,mask_path):
-
-        newroot = os.path.join(root, dataset_type,mask_type,'validation','acc_{}'.format(acc_factor))
+        acc_root = SliceData._resolve_acc_root(
+            os.path.join(root, dataset_type,mask_type,'validation'),
+            acc_factor,
+        )
+        newroot = acc_root
         # List the h5 files in root 
         files = [f for f in pathlib.Path(newroot).iterdir() if f.suffix == '.h5']
         self.examples = []
