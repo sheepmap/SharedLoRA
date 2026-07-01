@@ -79,20 +79,24 @@ def create_datasets(args):
     mask_types = args.mask_type.split(',')
     dataset_types = args.dataset_type.split(',')
 
-    train_data = SliceData(args.train_path,acc_factors, dataset_types,mask_types,'train', args.usmask_path)
-    dev_data = SliceData(args.validation_path,acc_factors,dataset_types,mask_types,'validation', args.usmask_path)
+    train_data = SliceData(
+        args.train_path, acc_factors, dataset_types, mask_types, 'train', args.usmask_path,
+        data_acceleration_factor=args.data_acceleration_factor
+    )
+    dev_data = SliceData(
+        args.validation_path, acc_factors, dataset_types, mask_types, 'validation', args.usmask_path,
+        data_acceleration_factor=args.data_acceleration_factor
+    )
 
-    display_dataset_type = dataset_types[0] if dataset_types else 'mrbrain_t1'
-    display_mask_type = mask_types[0] if mask_types else 'cartesian'
-    display_acc_factor = acc_factors[0] if acc_factors else '4x'
-    display1_data = SliceDisplayDataDev(args.validation_path, display_dataset_type, display_mask_type, display_acc_factor, args.usmask_path)
+    display1_data = dev_data
 
     return dev_data, train_data, display1_data
 
 def create_data_loaders(args):
     dev_data, train_data, display1_data = create_datasets(args)
 
-    display1 = [display1_data[i] for i in range(0, len(display1_data), len(display1_data) // 16)]
+    display_step = max(1, len(display1_data) // 16)
+    display1 = [display1_data[i] for i in range(0, len(display1_data), display_step)]
 
     train_loader = DataLoader(
         dataset=train_data,
@@ -500,6 +504,8 @@ def create_arg_parser():
     parser.add_argument('--validation-path',type=str,help='Path to test h5 files')
 
     parser.add_argument('--acceleration_factor',type=str,help='acceleration factors')
+    parser.add_argument('--data_acceleration_factor', type=str, default=None,
+                        help='acc factor directory to read h5 from, e.g. 16x; if unset, follows --acceleration_factor')
     parser.add_argument('--dataset_type',type=str,help='cardiac,kirby')
     parser.add_argument('--usmask_path',type=str,help='us mask path')
     parser.add_argument('--mask_type',type=str,help='mask type - cartesian, gaussian')
