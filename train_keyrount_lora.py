@@ -5,6 +5,7 @@ import random
 import shutil
 import time
 import functools
+import json
 import numpy as np
 import argparse
 import os
@@ -81,11 +82,13 @@ def create_datasets(args):
 
     train_data = SliceData(
         args.train_path, acc_factors, dataset_types, mask_types, 'train', args.usmask_path,
-        data_acceleration_factor=args.data_acceleration_factor
+        data_acceleration_factor=args.data_acceleration_factor,
+        expand_acc_factors=False,
     )
     dev_data = SliceData(
         args.validation_path, acc_factors, dataset_types, mask_types, 'validation', args.usmask_path,
-        data_acceleration_factor=args.data_acceleration_factor
+        data_acceleration_factor=args.data_acceleration_factor,
+        expand_acc_factors=True,
     )
 
     display1_data = dev_data
@@ -157,7 +160,7 @@ def train_epoch(args, epoch, model, data_loader, optimizer, scheduler, writer,
                 mask_bank, acc_factors, mask_types, dataset_types):
 
     model.train()
-    avg_loss = 0.
+    avg_loss_by_acc = {}
     start_epoch = start_iter = time.perf_counter()
     global_step = epoch * len(data_loader)
 
@@ -167,6 +170,7 @@ def train_epoch(args, epoch, model, data_loader, optimizer, scheduler, writer,
         target = target.unsqueeze(1).to(args.device)
         batch_acc_idx = random.randrange(len(acc_factors))
         acc_idx = torch.full_like(acc_idx, batch_acc_idx)
+        batch_acc_factor = acc_factors[batch_acc_idx]
 
         us_input_high, input_kspace_high, mask_high = gpu_undersample(
             target, acc_idx, mask_idx, ds_idx, mask_bank,
@@ -185,23 +189,41 @@ def train_epoch(args, epoch, model, data_loader, optimizer, scheduler, writer,
         optimizer.step()
         scheduler.step()
 
-        avg_loss = 0.99 * avg_loss + 0.01 * loss.item() if iter > 0 else loss.item()
+        prev_avg = avg_loss_by_acc.get(batch_acc_factor)
+        avg_loss_by_acc[batch_acc_factor] = (
+            0.99 * prev_avg + 0.01 * loss.item() if prev_avg is not None else loss.item()
+        )
         writer.add_scalar('TrainLoss', loss.item(), global_step + iter)
         if gates is not None:
             writer.add_scalar('TrainGateMean', gates.detach().mean().item(), global_step + iter)
+            writer.add_scalar(f'TrainGateMean/{batch_acc_factor}', gates.detach().mean().item(), global_step + iter)
+        writer.add_scalar(f'TrainLoss/{batch_acc_factor}', loss.item(), global_step + iter)
 
         if iter % args.report_interval == 0:
-            gate_log = f' GateMean = {gates.detach().mean().item():.4g}' if gates is not None else ''
+            gate_log = ''
+            if gates is not None:
+                gate_mean = gates.detach().mean().item()
+                gate_values = json.dumps(
+                    [round(v, 4) for v in gates[0].detach().cpu().tolist()],
+                    ensure_ascii=True,
+                )
+                gate_log = f' GateMean[{batch_acc_factor}] = {gate_mean:.4g} Gates[{batch_acc_factor}] = {gate_values} '
+            avg_loss_log = ' '.join(
+                f'AvgLoss[{acc}] = {avg_loss_by_acc[acc]:.4g}'
+                for acc in acc_factors if acc in avg_loss_by_acc
+            )
             logging.info(
                 f'Epoch = [{epoch:3d}/{args.num_epochs:3d}] '
                 f'Iter = [{iter:4d}/{len(data_loader):4d}] '
-                f'L1 Loss = {loss.item():.4g} Avg Loss = {avg_loss:.4g} '
+                f'L1 Loss = {loss.item():.4g} Acc = {batch_acc_factor} '
+                f'{avg_loss_log} '
                 f'{gate_log}'
                 f'Time = {time.perf_counter() - start_iter:.4f}s',
             )
         start_iter = time.perf_counter()
 
-    return avg_loss, time.perf_counter() - start_epoch
+    mean_avg_loss = np.mean(list(avg_loss_by_acc.values())) if avg_loss_by_acc else 0.
+    return mean_avg_loss, time.perf_counter() - start_epoch
 
 def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, mask_types, dataset_types):
 
@@ -209,6 +231,7 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
     losses = []
     psnr_list = []
     ssim_list = []
+    gate_means_by_acc = {acc: [] for acc in acc_factors}
     start = time.perf_counter()
 
     with torch.no_grad():
@@ -222,10 +245,17 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
             input_kspace = input_kspace.squeeze(1).float()  # [B, 1, H, W, 2] -> [B, H, W, 2]
             target = target.float()
 
-            output, _ = forward_with_lora_gates(model, us_input, input_kspace, mask)
+            output, gates = forward_with_lora_gates(model, us_input, input_kspace, mask)
 
             loss = F.mse_loss(output,target)
             losses.append(loss.item())
+            if gates is not None:
+                for acc_idx_value, acc_factor in enumerate(acc_factors):
+                    sample_selector = (acc_idx == acc_idx_value)
+                    if sample_selector.any():
+                        gate_means_by_acc[acc_factor].append(
+                            gates[sample_selector].detach().mean().item()
+                        )
 
             # 閫?slice 璁＄畻 PSNR/SSIM
             output_np = output.detach().cpu().numpy().squeeze(1)  # [B, H, W]
@@ -244,6 +274,17 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
         writer.add_scalar('Dev_Loss', avg_loss, epoch)
         writer.add_scalar('Dev_PSNR', avg_psnr, epoch)
         writer.add_scalar('Dev_SSIM', avg_ssim, epoch)
+        gate_logs = []
+        for acc_factor in acc_factors:
+            if gate_means_by_acc[acc_factor]:
+                acc_gate_mean = float(np.mean(gate_means_by_acc[acc_factor]))
+                writer.add_scalar(f'Dev_GateMean/{acc_factor}', acc_gate_mean, epoch)
+                gate_logs.append(f'GateMean[{acc_factor}] = {acc_gate_mean:.4g}')
+        if gate_logs:
+            logging.info(
+                f'Eval Epoch = [{epoch:3d}/{args.num_epochs:3d}] '
+                + ' '.join(gate_logs)
+            )
 
     return avg_loss, avg_psnr, avg_ssim, time.perf_counter() - start
 
