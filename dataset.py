@@ -14,7 +14,7 @@ class SliceData(Dataset):
     """
 
     def __init__(self, root, acc_factors,dataset_types,mask_types,train_or_valid,mask_path,
-                 data_acceleration_factor=None, expand_acc_factors=True): # acc_factor can be passed here and saved as self variable
+                 data_acceleration_factor=None, expand_acc_factors=True, return_metadata=False): # acc_factor can be passed here and saved as self variable
         #files = list(pathlib.Path(root).iterdir())
         self.examples = []
         self.mask_path = mask_path
@@ -22,6 +22,7 @@ class SliceData(Dataset):
         self.mask_types = mask_types
         self.dataset_types = dataset_types
         self.data_acceleration_factor = data_acceleration_factor
+        self.return_metadata = return_metadata
         for dataset_type in dataset_types:
             dataroot = os.path.join(root, dataset_type)
             for mask_type in mask_types:
@@ -79,6 +80,8 @@ class SliceData(Dataset):
         acc_idx = self.acc_factors.index(acc_factor)
         mask_idx = self.mask_types.index(mask_type)
         ds_idx = self.dataset_types.index(dataset_type)
+        if self.return_metadata:
+            return torch.from_numpy(target), acc_idx, mask_idx, ds_idx, str(fname.name), slice
         return torch.from_numpy(target), acc_idx, mask_idx, ds_idx
 
             

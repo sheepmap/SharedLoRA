@@ -89,6 +89,7 @@ def create_datasets(args):
         args.validation_path, acc_factors, dataset_types, mask_types, 'validation', args.usmask_path,
         data_acceleration_factor=args.data_acceleration_factor,
         expand_acc_factors=True,
+        return_metadata=True,
     )
 
     display1_data = dev_data
@@ -232,12 +233,14 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
     psnr_list = []
     ssim_list = []
     gate_means_by_acc = {acc: [] for acc in acc_factors}
+    volume_predictions = {}
+    volume_targets = {}
     start = time.perf_counter()
 
     with torch.no_grad():
         for iter, data in enumerate(tqdm(data_loader)):
 
-            target, acc_idx, mask_idx, ds_idx = data
+            target, acc_idx, mask_idx, ds_idx, fnames, slices = data
             target = target.unsqueeze(1).to(args.device)
             us_input, input_kspace, mask = gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, mask_types, dataset_types)
 
@@ -257,18 +260,29 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
                             gates[sample_selector].detach().mean().item()
                         )
 
-            # 閫?slice 璁＄畻 PSNR/SSIM
             output_np = output.detach().cpu().numpy().squeeze(1)  # [B, H, W]
             target_np = target.detach().cpu().numpy().squeeze(1)
             for b in range(output_np.shape[0]):
-                gt = target_np[b]
-                pred = output_np[b]
-                data_range = gt.max()
-                if data_range > 0:
-                    psnr_list.append(peak_signal_noise_ratio(gt, pred, data_range=data_range))
-                    ssim_list.append(structural_similarity(gt, pred, data_range=data_range))
+                acc_factor = acc_factors[acc_idx[b].item() if hasattr(acc_idx[b], 'item') else acc_idx[b]]
+                volume_key = (fnames[b], acc_factor)
+                volume_predictions.setdefault(volume_key, []).append((int(slices[b]), output_np[b]))
+                volume_targets.setdefault(volume_key, []).append((int(slices[b]), target_np[b]))
 
         avg_loss = np.mean(losses)
+        for volume_key in sorted(volume_predictions.keys()):
+            pred_slices = np.stack([pred for _, pred in sorted(volume_predictions[volume_key], key=lambda x: x[0])], axis=0)
+            gt_slices = np.stack([gt for _, gt in sorted(volume_targets[volume_key], key=lambda x: x[0])], axis=0)
+            gt_volume = np.transpose(gt_slices, (1, 2, 0))
+            pred_volume = np.transpose(pred_slices, (1, 2, 0))
+            data_range = gt_volume.max()
+            if data_range > 0:
+                psnr_list.append(peak_signal_noise_ratio(gt_volume, pred_volume, data_range=data_range))
+                ssim_per_slice = [
+                    structural_similarity(gt_slices[i], pred_slices[i], data_range=gt_slices[i].max())
+                    for i in range(gt_slices.shape[0]) if gt_slices[i].max() > 0
+                ]
+                if ssim_per_slice:
+                    ssim_list.append(float(np.mean(ssim_per_slice)))
         avg_psnr = np.mean(psnr_list)
         avg_ssim = np.mean(ssim_list)
         writer.add_scalar('Dev_Loss', avg_loss, epoch)
@@ -503,7 +517,10 @@ def main(args):
             args, epoch, model, train_loader, optimizer, scheduler, writer,
             mask_bank, acc_factors, mask_types, dataset_types)
         dev_loss, dev_psnr, dev_ssim, dev_time = evaluate(args, epoch, model, dev_loader, writer, mask_bank, acc_factors, mask_types, dataset_types)
-        visualize(args, epoch, model, display1_loader, writer, 't1')
+        visualize(
+            args, epoch, model, display1_loader, writer, 't1',
+            mask_bank, acc_factors, mask_types, dataset_types
+        )
 
         is_new_best = dev_psnr > best_psnr
         best_psnr = max(best_psnr, dev_psnr)
