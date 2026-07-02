@@ -3,13 +3,60 @@ import sys
 from collections import defaultdict
 import argparse
 import gc
+import re
 import numpy as np
 import torch
+from torch import nn
 from torch.utils.data import DataLoader
 from dataset import SliceDataDev
 from models import DnCn
 import h5py
 from tqdm import tqdm
+
+
+class LoRAGateNet(nn.Module):
+    """Predict batch-shared LoRA scales [n_lora] from an acceleration scalar."""
+
+    def __init__(self, n_lora):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(1, 64),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, 64),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, n_lora),
+        )
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.zeros_(self.mlp[-1].bias)
+
+    def forward(self, x):
+        if x.dim() == 0:
+            x = x.view(1, 1)
+        elif x.dim() == 1:
+            x = x.view(1, -1)
+        elif x.dim() != 2:
+            raise ValueError(f"Expected acceleration input with <=2 dims, got shape {tuple(x.shape)}")
+        return self.mlp(x).squeeze(0)
+
+
+def _inner_model(model):
+    return model.module if hasattr(model, 'module') else model
+
+
+def parse_acceleration_factor(acc_factor):
+    match = re.search(r"[-+]?\d*\.?\d+", str(acc_factor))
+    if match is None:
+        raise ValueError(f"Unable to parse acceleration factor from {acc_factor!r}")
+    return float(match.group(0))
+
+
+def get_inference_acceleration_value(acceleration_factor):
+    acc_factors = [item.strip() for item in str(acceleration_factor).split(',') if item.strip()]
+    if len(acc_factors) != 1:
+        raise ValueError(
+            f"valid.py expects a single acceleration factor, got {acceleration_factor!r}"
+        )
+    return parse_acceleration_factor(acc_factors[0])
 
 def save_reconstructions(reconstructions, out_dir):
     """
@@ -56,26 +103,34 @@ def load_model(checkpoint_file, use_lora=False, lora_path=None):
         melora_r = [int(x.strip()) for x in lora_args.melora_r.split(",")]
         melora_alpha = [int(x.strip()) for x in lora_args.melora_alpha.split(",")]
         target = [x.strip() for x in lora_args.melora_target.split(",")] if getattr(lora_args, 'melora_target', None) else None
-        from MC_DDPM_SH.models.melora_utils import apply_melora_to_model
+        from MC_DDPM_SH.models.melora_utils import apply_melora_to_model, assign_melora_gate_indices
         apply_melora_to_model(model, melora_r, melora_alpha,
                               lora_dropout=getattr(lora_args, 'melora_dropout', 0.0),
                               target_module_names=target,
                               verbose=True)
 
+        lora_state = torch.load(lora_path)
+        uses_gate_net = any(k.startswith('lora_gate_net.') for k in lora_state.keys())
+        if uses_gate_net:
+            n_lora = assign_melora_gate_indices(model)
+            model.lora_gate_net = LoRAGateNet(n_lora).to(args.device)
+
         if args.data_parallel:
             model = torch.nn.DataParallel(model)
 
-        lora_state = torch.load(lora_path)
         model.load_state_dict(lora_state, strict=False)
 
-        for m in model.modules():
-            if hasattr(m, 'merge'):
-                m.merge()
-                # Grouped convs skip merge (weight shape incompatible),
-                # so keep their LoRA adapters active in forward pass.
-                if m.conv.groups <= 1:
-                    m.disable_adapters = True
-        print(f"MELoRA adapter loaded from {lora_path} and merged for inference")
+        if uses_gate_net:
+            print(f"MELoRA adapter with gate net loaded from {lora_path} for dynamic inference")
+        else:
+            for m in model.modules():
+                if hasattr(m, 'merge'):
+                    m.merge()
+                    # Grouped convs skip merge (weight shape incompatible),
+                    # so keep their LoRA adapters active in forward pass.
+                    if m.conv.groups <= 1:
+                        m.disable_adapters = True
+            print(f"MELoRA adapter loaded from {lora_path} and merged for inference")
     else:
         # Original inference (no LoRA)
         if args.data_parallel:
@@ -86,6 +141,16 @@ def load_model(checkpoint_file, use_lora=False, lora_path=None):
 
 
 def run_unet(args, model, data_loader):
+    inner = _inner_model(model)
+    has_gate_net = hasattr(inner, 'lora_gate_net')
+    gates = None
+    if has_gate_net:
+        from MC_DDPM_SH.models.melora_utils import clear_melora_gates, set_melora_gates
+
+        acc_value = get_inference_acceleration_value(args.acceleration_factor)
+        gate_input = torch.tensor([acc_value], dtype=torch.float32, device=args.device)
+        gates = inner.lora_gate_net(gate_input)
+
     model.eval()
     reconstructions = defaultdict(list)
     with torch.no_grad():
@@ -98,7 +163,14 @@ def run_unet(args, model, data_loader):
 
             us_input = us_input.float()
 
-            recons = model(us_input,input_kspace,mask).to('cpu').squeeze(1)
+            if has_gate_net:
+                set_melora_gates(model, gates)
+                try:
+                    recons = model(us_input,input_kspace,mask).to('cpu').squeeze(1)
+                finally:
+                    clear_melora_gates(model)
+            else:
+                recons = model(us_input,input_kspace,mask).to('cpu').squeeze(1)
 
             if args.dataset_type == 'cardiac':
                 recons = recons[:,5:155,5:155]

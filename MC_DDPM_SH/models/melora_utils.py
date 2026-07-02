@@ -308,11 +308,13 @@ def assign_melora_gate_indices(model: nn.Module) -> int:
 
 
 def set_melora_gates(model: nn.Module, gates: torch.Tensor) -> None:
-    """Attach sample-wise gates [B, n_lora] to MELoRA layers for forward."""
+    """Attach batch-shared gates [n_lora] to MELoRA layers for forward."""
+    if gates.dim() != 1:
+        raise ValueError(f"Expected LoRA gates with shape [n_lora], got {tuple(gates.shape)}")
     for layer in get_melora_layers(model):
         if layer.gate_index is None:
             raise RuntimeError("MELoRA gate indices have not been assigned")
-        layer.current_gate = gates[:, layer.gate_index].view(-1, 1, 1, 1)
+        layer.current_gate = gates[layer.gate_index].view(1, 1, 1, 1)
 
 
 def clear_melora_gates(model: nn.Module) -> None:
