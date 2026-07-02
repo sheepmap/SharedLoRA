@@ -233,6 +233,10 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
     psnr_list = []
     ssim_list = []
     gate_means_by_acc = {acc: [] for acc in acc_factors}
+    gate_vectors_by_acc = {acc: [] for acc in acc_factors}
+    losses_by_acc = {acc: [] for acc in acc_factors}
+    psnr_by_acc = {acc: [] for acc in acc_factors}
+    ssim_by_acc = {acc: [] for acc in acc_factors}
     volume_predictions = {}
     volume_targets = {}
     start = time.perf_counter()
@@ -252,18 +256,15 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
 
             loss = F.mse_loss(output,target)
             losses.append(loss.item())
-            if gates is not None:
-                for acc_idx_value, acc_factor in enumerate(acc_factors):
-                    sample_selector = (acc_idx == acc_idx_value)
-                    if sample_selector.any():
-                        gate_means_by_acc[acc_factor].append(
-                            gates[sample_selector].detach().mean().item()
-                        )
 
             output_np = output.detach().cpu().numpy().squeeze(1)  # [B, H, W]
             target_np = target.detach().cpu().numpy().squeeze(1)
             for b in range(output_np.shape[0]):
                 acc_factor = acc_factors[acc_idx[b].item() if hasattr(acc_idx[b], 'item') else acc_idx[b]]
+                losses_by_acc[acc_factor].append(float(np.mean((output_np[b] - target_np[b]) ** 2)))
+                if gates is not None:
+                    gate_means_by_acc[acc_factor].append(gates[b].detach().mean().item())
+                    gate_vectors_by_acc[acc_factor].append(gates[b].detach().cpu().numpy())
                 volume_key = (fnames[b], acc_factor)
                 volume_predictions.setdefault(volume_key, []).append((int(slices[b]), output_np[b]))
                 volume_targets.setdefault(volume_key, []).append((int(slices[b]), target_np[b]))
@@ -276,31 +277,67 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
             pred_volume = np.transpose(pred_slices, (1, 2, 0))
             data_range = gt_volume.max()
             if data_range > 0:
-                psnr_list.append(peak_signal_noise_ratio(gt_volume, pred_volume, data_range=data_range))
+                volume_psnr = peak_signal_noise_ratio(gt_volume, pred_volume, data_range=data_range)
+                psnr_list.append(volume_psnr)
                 ssim_per_slice = [
                     structural_similarity(gt_slices[i], pred_slices[i], data_range=gt_slices[i].max())
                     for i in range(gt_slices.shape[0]) if gt_slices[i].max() > 0
                 ]
                 if ssim_per_slice:
-                    ssim_list.append(float(np.mean(ssim_per_slice)))
+                    volume_ssim = float(np.mean(ssim_per_slice))
+                    ssim_list.append(volume_ssim)
+                else:
+                    volume_ssim = None
+                acc_factor = volume_key[1]
+                psnr_by_acc[acc_factor].append(volume_psnr)
+                if volume_ssim is not None:
+                    ssim_by_acc[acc_factor].append(volume_ssim)
         avg_psnr = np.mean(psnr_list)
         avg_ssim = np.mean(ssim_list)
         writer.add_scalar('Dev_Loss', avg_loss, epoch)
         writer.add_scalar('Dev_PSNR', avg_psnr, epoch)
         writer.add_scalar('Dev_SSIM', avg_ssim, epoch)
         gate_logs = []
+        metric_logs = []
         for acc_factor in acc_factors:
+            if losses_by_acc[acc_factor]:
+                acc_loss_mean = float(np.mean(losses_by_acc[acc_factor]))
+                writer.add_scalar(f'Dev_Loss/{acc_factor}', acc_loss_mean, epoch)
+                metric_logs.append(f'DevLoss[{acc_factor}] = {acc_loss_mean:.4g}')
+            if psnr_by_acc[acc_factor]:
+                acc_psnr_mean = float(np.mean(psnr_by_acc[acc_factor]))
+                writer.add_scalar(f'Dev_PSNR/{acc_factor}', acc_psnr_mean, epoch)
+                metric_logs.append(f'PSNR[{acc_factor}] = {acc_psnr_mean:.4g}')
+            if ssim_by_acc[acc_factor]:
+                acc_ssim_mean = float(np.mean(ssim_by_acc[acc_factor]))
+                writer.add_scalar(f'Dev_SSIM/{acc_factor}', acc_ssim_mean, epoch)
+                metric_logs.append(f'SSIM[{acc_factor}] = {acc_ssim_mean:.4g}')
             if gate_means_by_acc[acc_factor]:
                 acc_gate_mean = float(np.mean(gate_means_by_acc[acc_factor]))
                 writer.add_scalar(f'Dev_GateMean/{acc_factor}', acc_gate_mean, epoch)
-                gate_logs.append(f'GateMean[{acc_factor}] = {acc_gate_mean:.4g}')
-        if gate_logs:
+                if gate_vectors_by_acc[acc_factor]:
+                    gate_vector_mean = np.mean(np.stack(gate_vectors_by_acc[acc_factor], axis=0), axis=0)
+                    gate_vector_str = json.dumps([round(float(v), 4) for v in gate_vector_mean.tolist()], ensure_ascii=True)
+                    gate_logs.append(f'GateMean[{acc_factor}] = {acc_gate_mean:.4g} GateVecMean[{acc_factor}] = {gate_vector_str}')
+                else:
+                    gate_logs.append(f'GateMean[{acc_factor}] = {acc_gate_mean:.4g}')
+        if gate_logs or metric_logs:
             logging.info(
                 f'Eval Epoch = [{epoch:3d}/{args.num_epochs:3d}] '
-                + ' '.join(gate_logs)
+                + ' '.join(metric_logs + gate_logs)
             )
 
-    return avg_loss, avg_psnr, avg_ssim, time.perf_counter() - start
+    metrics_by_acc = {}
+    for acc_factor in acc_factors:
+        metrics_by_acc[acc_factor] = {}
+        if losses_by_acc[acc_factor]:
+            metrics_by_acc[acc_factor]['loss'] = float(np.mean(losses_by_acc[acc_factor]))
+        if psnr_by_acc[acc_factor]:
+            metrics_by_acc[acc_factor]['psnr'] = float(np.mean(psnr_by_acc[acc_factor]))
+        if ssim_by_acc[acc_factor]:
+            metrics_by_acc[acc_factor]['ssim'] = float(np.mean(ssim_by_acc[acc_factor]))
+
+    return avg_loss, avg_psnr, avg_ssim, time.perf_counter() - start, metrics_by_acc
 
 
 def visualize(args, epoch, model, data_loader, writer, datasettype_string, mask_bank=None, acc_factors=None, mask_types=None, dataset_types=None):
@@ -317,7 +354,10 @@ def visualize(args, epoch, model, data_loader, writer, datasettype_string, mask_
         for iter, data in enumerate(tqdm(data_loader)):
             if mask_bank is not None:
                 # SliceData returns (target, acc_idx, mask_idx, ds_idx)
-                target, acc_idx, mask_idx, ds_idx = data
+                if len(data) == 6:
+                    target, acc_idx, mask_idx, ds_idx, _, _ = data
+                else:
+                    target, acc_idx, mask_idx, ds_idx = data
                 target = target.unsqueeze(1).to(args.device)
                 us_input, input_kspace, mask = gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, mask_types, dataset_types)
                 us_input = us_input.squeeze(1)  # [B, 1, 1, H, W] -> [B, 1, H, W]
@@ -516,7 +556,9 @@ def main(args):
         train_loss, train_time = train_epoch(
             args, epoch, model, train_loader, optimizer, scheduler, writer,
             mask_bank, acc_factors, mask_types, dataset_types)
-        dev_loss, dev_psnr, dev_ssim, dev_time = evaluate(args, epoch, model, dev_loader, writer, mask_bank, acc_factors, mask_types, dataset_types)
+        dev_loss, dev_psnr, dev_ssim, dev_time, dev_metrics_by_acc = evaluate(
+            args, epoch, model, dev_loader, writer, mask_bank, acc_factors, mask_types, dataset_types
+        )
         visualize(
             args, epoch, model, display1_loader, writer, 't1',
             mask_bank, acc_factors, mask_types, dataset_types
@@ -525,9 +567,17 @@ def main(args):
         is_new_best = dev_psnr > best_psnr
         best_psnr = max(best_psnr, dev_psnr)
         save_model(args, melora_dir, epoch, model, optimizer, scheduler, best_psnr, is_new_best)
+        dev_metric_log = ' '.join(
+            ' '.join(
+                f'{metric.upper()}[{acc}] = {value:.4g}'
+                for metric, value in dev_metrics_by_acc[acc].items()
+            )
+            for acc in acc_factors if dev_metrics_by_acc.get(acc)
+        )
         logging.info(
             f'Epoch = [{epoch:4d}/{args.num_epochs:4d}] TrainLoss = {train_loss:.4g} '
             f'DevLoss = {dev_loss:.4g} PSNR = {dev_psnr:.4g} SSIM = {dev_ssim:.4g} '
+            f'{dev_metric_log} '
             f'TrainTime = {train_time:.4f}s DevTime = {dev_time:.4f}s',
         )
     writer.close()
