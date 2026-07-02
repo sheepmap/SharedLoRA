@@ -2,6 +2,7 @@ import pathlib
 import sys
 from collections import defaultdict
 import argparse
+import gc
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -107,6 +108,10 @@ def run_unet(args, model, data_loader):
                 recons[i] = recons[i] 
                 reconstructions[fnames[i]].append((slices[i].numpy(), recons[i].numpy()))
 
+            del us_input, input_kspace, target, mask, recons, data
+            if torch.cuda.is_available() and str(args.device).startswith('cuda'):
+                torch.cuda.empty_cache()
+
     reconstructions = {
         fname: np.stack([pred for _, pred in sorted(slice_preds)])
         for fname, slice_preds in reconstructions.items()
@@ -115,11 +120,22 @@ def run_unet(args, model, data_loader):
 
 
 def main(args):
-    
-    data_loader = create_data_loaders(args)
-    model = load_model(args.checkpoint, args.use_lora, args.lora_path)
-    reconstructions = run_unet(args, model, data_loader)
-    save_reconstructions(reconstructions, args.out_dir)
+    data_loader = None
+    model = None
+    reconstructions = None
+    try:
+        data_loader = create_data_loaders(args)
+        model = load_model(args.checkpoint, args.use_lora, args.lora_path)
+        reconstructions = run_unet(args, model, data_loader)
+        save_reconstructions(reconstructions, args.out_dir)
+    finally:
+        if model is not None:
+            model.cpu()
+        del reconstructions, model, data_loader
+        gc.collect()
+        if torch.cuda.is_available() and str(args.device).startswith('cuda'):
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
 
 
 def create_arg_parser():
