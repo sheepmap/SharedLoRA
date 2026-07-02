@@ -338,38 +338,24 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
         writer.add_scalar('Dev_Loss', avg_loss, epoch)
         writer.add_scalar('Dev_PSNR', avg_psnr, epoch)
         writer.add_scalar('Dev_SSIM', avg_ssim, epoch)
-        gate_logs = []
-        metric_logs = []
         for acc_factor in acc_factors:
             if losses_by_acc[acc_factor]:
                 acc_loss_mean = float(np.mean(losses_by_acc[acc_factor]))
                 writer.add_scalar(f'Dev_Loss/{acc_factor}', acc_loss_mean, epoch)
-                metric_logs.append(f'DevLoss[{acc_factor}] = {acc_loss_mean:.4g}')
             if psnr_by_acc[acc_factor]:
                 acc_psnr_mean = float(np.mean(psnr_by_acc[acc_factor]))
                 writer.add_scalar(f'Dev_PSNR/{acc_factor}', acc_psnr_mean, epoch)
-                metric_logs.append(f'PSNR[{acc_factor}] = {acc_psnr_mean:.4g}')
             if ssim_by_acc[acc_factor]:
                 acc_ssim_mean = float(np.mean(ssim_by_acc[acc_factor]))
                 writer.add_scalar(f'Dev_SSIM/{acc_factor}', acc_ssim_mean, epoch)
-                metric_logs.append(f'SSIM[{acc_factor}] = {acc_ssim_mean:.4g}')
             if gate_means_by_acc[acc_factor]:
                 acc_gate_mean = float(np.mean(gate_means_by_acc[acc_factor]))
                 writer.add_scalar(f'Dev_ScaleMean/{acc_factor}', acc_gate_mean, epoch)
-                if gate_vectors_by_acc[acc_factor]:
-                    gate_vector_mean = np.mean(np.stack(gate_vectors_by_acc[acc_factor], axis=0), axis=0)
-                    gate_vector_str = json.dumps([round(float(v), 4) for v in gate_vector_mean.tolist()], ensure_ascii=True)
-                    gate_logs.append(
-                        f'ScaleMean[{acc_factor}] = {acc_gate_mean:.4g} '
-                        f'ScaleVecMean[{acc_factor}] = {gate_vector_str}'
-                    )
-                else:
-                    gate_logs.append(f'ScaleMean[{acc_factor}] = {acc_gate_mean:.4g}')
-        if gate_logs or metric_logs:
-            logging.info(
-                f'Eval Epoch = [{epoch:3d}/{args.num_epochs:3d}] '
-                + ' '.join(metric_logs + gate_logs)
-            )
+        eval_log = format_eval_log(
+            epoch, args.num_epochs, acc_factors, losses_by_acc, psnr_by_acc, ssim_by_acc,
+            gate_means_by_acc, gate_vectors_by_acc,
+        )
+        logging.info(eval_log)
 
     metrics_by_acc = {}
     for acc_factor in acc_factors:
@@ -381,7 +367,7 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
         if ssim_by_acc[acc_factor]:
             metrics_by_acc[acc_factor]['ssim'] = float(np.mean(ssim_by_acc[acc_factor]))
 
-    return avg_loss, avg_psnr, avg_ssim, time.perf_counter() - start, metrics_by_acc
+    return avg_loss, avg_psnr, avg_ssim, time.perf_counter() - start, metrics_by_acc, eval_log
 
 
 def visualize(args, epoch, model, data_loader, writer, datasettype_string, mask_bank=None, acc_factors=None, mask_types=None, dataset_types=None):
@@ -434,6 +420,47 @@ def _make_melora_dirname(args):
     r_str = args.melora_r.replace(',', '_')
     target_str = args.melora_target.replace(',', '_') if args.melora_target else 'all'
     return f'r{r_str}_{target_str}'
+
+
+def format_eval_log(epoch, num_epochs, acc_factors, losses_by_acc, psnr_by_acc, ssim_by_acc,
+                    gate_means_by_acc, gate_vectors_by_acc):
+    metric_logs = []
+    gate_logs = []
+    for acc_factor in acc_factors:
+        if losses_by_acc[acc_factor]:
+            acc_loss_mean = float(np.mean(losses_by_acc[acc_factor]))
+            metric_logs.append(f'DevLoss[{acc_factor}] = {acc_loss_mean:.4g}')
+        if psnr_by_acc[acc_factor]:
+            acc_psnr_mean = float(np.mean(psnr_by_acc[acc_factor]))
+            metric_logs.append(f'PSNR[{acc_factor}] = {acc_psnr_mean:.4g}')
+        if ssim_by_acc[acc_factor]:
+            acc_ssim_mean = float(np.mean(ssim_by_acc[acc_factor]))
+            metric_logs.append(f'SSIM[{acc_factor}] = {acc_ssim_mean:.4g}')
+        if gate_means_by_acc[acc_factor]:
+            acc_gate_mean = float(np.mean(gate_means_by_acc[acc_factor]))
+            if gate_vectors_by_acc[acc_factor]:
+                gate_vector_mean = np.mean(np.stack(gate_vectors_by_acc[acc_factor], axis=0), axis=0)
+                gate_vector_str = json.dumps(
+                    [round(float(v), 4) for v in gate_vector_mean.tolist()],
+                    ensure_ascii=True,
+                )
+                gate_logs.append(
+                    f'ScaleMean[{acc_factor}] = {acc_gate_mean:.4g} '
+                    f'ScaleVecMean[{acc_factor}] = {gate_vector_str}'
+                )
+            else:
+                gate_logs.append(f'ScaleMean[{acc_factor}] = {acc_gate_mean:.4g}')
+
+    parts = metric_logs + gate_logs
+    prefix = f'Eval Epoch = [{epoch:3d}/{num_epochs:3d}]'
+    return prefix if not parts else f'{prefix} ' + ' '.join(parts)
+
+
+def save_epoch_validation_log(save_dir, epoch, eval_log, summary_log):
+    log_dir = save_dir / 'validation_logs'
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f'epoch_{epoch:04d}.txt'
+    log_path.write_text(f'{eval_log}\n{summary_log}\n', encoding='utf-8')
 
 def save_model(args, save_dir, epoch, model, optimizer, scheduler, best_psnr, is_new_best):
     """Save LoRA adapter, gate net, and training metadata. No base weights."""
@@ -605,7 +632,7 @@ def main(args):
         train_loss, train_time = train_epoch(
             args, epoch, model, train_loader, optimizer, scheduler, writer,
             mask_bank, acc_factors, mask_types, dataset_types)
-        dev_loss, dev_psnr, dev_ssim, dev_time, dev_metrics_by_acc = evaluate(
+        dev_loss, dev_psnr, dev_ssim, dev_time, dev_metrics_by_acc, eval_log = evaluate(
             args, epoch, model, dev_loader, writer, mask_bank, acc_factors, mask_types, dataset_types
         )
         visualize(
@@ -623,12 +650,14 @@ def main(args):
             )
             for acc in acc_factors if dev_metrics_by_acc.get(acc)
         )
-        logging.info(
+        summary_log = (
             f'Epoch = [{epoch:4d}/{args.num_epochs:4d}] TrainLoss = {train_loss:.4g} '
             f'DevLoss = {dev_loss:.4g} PSNR = {dev_psnr:.4g} SSIM = {dev_ssim:.4g} '
             f'{dev_metric_log} '
-            f'TrainTime = {train_time:.4f}s DevTime = {dev_time:.4f}s',
+            f'TrainTime = {train_time:.4f}s DevTime = {dev_time:.4f}s'
         )
+        logging.info(summary_log)
+        save_epoch_validation_log(melora_dir, epoch, eval_log, summary_log)
     writer.close()
 
 def create_arg_parser():
