@@ -138,6 +138,8 @@ if __name__ == '__main__':
     parser.add_argument('--report-path', type=pathlib.Path, required=True,
                         help='Path to save metrics')
     parser.add_argument('--acc-factor', type=str, required=True) 
+    parser.add_argument('--report-file-acc-factor', type=str, default=None,
+                        help='Acc factor used in the report filename when aggregating multiple runs')
     parser.add_argument('--mask-type', type=str, required=True)
     parser.add_argument('--dataset-type', type=str, required=True)
     args = parser.parse_args()
@@ -146,7 +148,22 @@ if __name__ == '__main__':
     metrics = evaluate(args, recons_key)
     metrics_report = metrics.get_report()
 
-    with open(args.report_path / 'report_{}_{}_{}.txt'.format(args.dataset_type,args.mask_type,args.acc_factor),'w') as f:
-        f.write(metrics_report)
+    report_acc_factor = args.report_file_acc_factor or args.acc_factor
+    report_file = args.report_path / 'report_{}_{}_{}.txt'.format(
+        args.dataset_type, args.mask_type, report_acc_factor
+    )
+    report_file.parent.mkdir(parents=True, exist_ok=True)
+
+    if args.report_file_acc_factor is None:
+        write_mode = 'w'
+        report_content = metrics_report
+    else:
+        write_mode = 'w' if args.acc_factor == report_acc_factor else 'a'
+        report_content = '[{}]   {}'.format(args.acc_factor, metrics_report)
+        if write_mode == 'a' and report_file.exists() and report_file.stat().st_size > 0:
+            report_content = '\n' + report_content
+
+    with open(report_file, write_mode) as f:
+        f.write(report_content)
 
     #print(metrics)
