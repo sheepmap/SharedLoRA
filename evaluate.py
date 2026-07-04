@@ -4,11 +4,35 @@ from argparse import ArgumentParser
 
 import h5py
 import numpy as np
-from runstats import Statistics
 #from skimage.measure import compare_psnr, compare_ssim
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 from skimage.filters import laplace
 from tqdm import tqdm
+
+
+class Statistics:
+    """Lightweight running mean/std tracker to avoid external runstats dependency."""
+
+    def __init__(self):
+        self.count = 0
+        self.mean_value = 0.0
+        self.m2 = 0.0
+
+    def push(self, value):
+        value = float(value)
+        self.count += 1
+        delta = value - self.mean_value
+        self.mean_value += delta / self.count
+        delta2 = value - self.mean_value
+        self.m2 += delta * delta2
+
+    def mean(self):
+        return self.mean_value if self.count else 0.0
+
+    def stddev(self):
+        if self.count < 2:
+            return 0.0
+        return float(np.sqrt(self.m2 / (self.count - 1)))
 
 # adding hfn metric 
 def hfn(gt,pred):
