@@ -86,10 +86,23 @@ def create_data_loaders(args):
     )
 
     return data_loader
+def load_torch_checkpoint(path, map_location=None):
+    """
+    Load trusted project checkpoints across PyTorch versions.
+
+    PyTorch 2.6 changed torch.load default `weights_only` from False to True,
+    which breaks older checkpoints that store argparse.Namespace in `args`.
+    """
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
+
+
 
 
 def load_model(checkpoint_file, use_lora=False, lora_path=None):
-    checkpoint = torch.load(checkpoint_file)
+    checkpoint = load_torch_checkpoint(checkpoint_file)
     args = checkpoint['args']
     model = DnCn(args,n_channels=1).to(args.device)
 
@@ -98,7 +111,7 @@ def load_model(checkpoint_file, use_lora=False, lora_path=None):
         model.load_state_dict(checkpoint['model'], strict=False)
 
         # Load LoRA hyperparams from checkpoint.pt (saved alongside adapter)
-        lora_chk = torch.load(pathlib.Path(lora_path).parent / 'checkpoint.pt')
+        lora_chk = load_torch_checkpoint(pathlib.Path(lora_path).parent / 'checkpoint.pt')
         lora_args = lora_chk['args']
         melora_r = [int(x.strip()) for x in lora_args.melora_r.split(",")]
         melora_alpha = [int(x.strip()) for x in lora_args.melora_alpha.split(",")]
@@ -109,7 +122,7 @@ def load_model(checkpoint_file, use_lora=False, lora_path=None):
                               target_module_names=target,
                               verbose=True)
 
-        lora_state = torch.load(lora_path)
+        lora_state = load_torch_checkpoint(lora_path)
         uses_gate_net = any(k.startswith('lora_gate_net.') for k in lora_state.keys())
         if uses_gate_net:
             n_lora = assign_melora_gate_indices(model)
