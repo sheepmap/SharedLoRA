@@ -27,7 +27,7 @@ class LoRAGateNet(nn.Module):
             nn.Linear(64, n_lora),
         )
         nn.init.zeros_(self.mlp[-1].weight)
-        nn.init.zeros_(self.mlp[-1].bias)
+        nn.init.ones_(self.mlp[-1].bias)
 
     def forward(self, x):
         if x.dim() == 0:
@@ -86,6 +86,8 @@ def create_data_loaders(args):
     )
 
     return data_loader
+
+
 def load_torch_checkpoint(path, map_location=None):
     """
     Load trusted project checkpoints across PyTorch versions.
@@ -97,8 +99,6 @@ def load_torch_checkpoint(path, map_location=None):
         return torch.load(path, map_location=map_location, weights_only=False)
     except TypeError:
         return torch.load(path, map_location=map_location)
-
-
 
 
 def load_model(checkpoint_file, use_lora=False, lora_path=None):
