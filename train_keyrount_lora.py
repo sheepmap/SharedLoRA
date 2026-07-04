@@ -109,6 +109,42 @@ def forward_with_lora_gates(model, us_input, input_kspace, mask, acc_idx, acc_fa
         clear_melora_gates(model)
     return output, gates
 
+
+def forward_with_grouped_lora_gates(model, us_input, input_kspace, mask, acc_idx, acc_factors):
+    """Handle mixed-acc batches by running one forward per acceleration factor."""
+    inner = _inner_model(model)
+    if not hasattr(inner, 'lora_gate_net'):
+        return model(us_input, input_kspace, mask), None
+
+    acc_tensor = acc_idx if torch.is_tensor(acc_idx) else torch.as_tensor(acc_idx)
+    acc_tensor = acc_tensor.to(us_input.device).view(-1)
+    unique_acc = torch.unique(acc_tensor)
+    if unique_acc.numel() <= 1:
+        return forward_with_lora_gates(model, us_input, input_kspace, mask, acc_tensor, acc_factors)
+
+    outputs = None
+    gate_matrix = None
+    for acc_value in unique_acc.tolist():
+        selector = acc_tensor == acc_value
+        chunk_output, chunk_gates = forward_with_lora_gates(
+            model,
+            us_input[selector],
+            input_kspace[selector],
+            mask[selector],
+            acc_tensor[selector],
+            acc_factors,
+        )
+        if outputs is None:
+            outputs = chunk_output.new_empty((us_input.shape[0],) + tuple(chunk_output.shape[1:]))
+        outputs[selector] = chunk_output
+
+        if chunk_gates is not None:
+            if gate_matrix is None:
+                gate_matrix = chunk_gates.new_empty((us_input.shape[0], chunk_gates.numel()))
+            gate_matrix[selector] = chunk_gates.unsqueeze(0).expand(int(selector.sum().item()), -1)
+
+    return outputs, gate_matrix
+
 def create_datasets(args):
 
 
@@ -293,7 +329,7 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
             input_kspace = input_kspace.squeeze(1).float()  # [B, 1, H, W, 2] -> [B, H, W, 2]
             target = target.float()
 
-            output, gates = forward_with_lora_gates(
+            output, gates = forward_with_grouped_lora_gates(
                 model, us_input, input_kspace, mask, acc_idx, acc_factors
             )
 
@@ -302,12 +338,21 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
 
             output_np = output.detach().cpu().numpy().squeeze(1)  # [B, H, W]
             target_np = target.detach().cpu().numpy().squeeze(1)
+            gate_vectors = None
+            gate_means = None
+            if gates is not None:
+                gates_cpu = gates.detach().cpu()
+                if gates_cpu.dim() == 1:
+                    gate_vectors = gates_cpu.unsqueeze(0).expand(output_np.shape[0], -1).numpy()
+                else:
+                    gate_vectors = gates_cpu.numpy()
+                gate_means = gate_vectors.mean(axis=1)
             for b in range(output_np.shape[0]):
                 acc_factor = acc_factors[acc_idx[b].item() if hasattr(acc_idx[b], 'item') else acc_idx[b]]
                 losses_by_acc[acc_factor].append(float(np.mean((output_np[b] - target_np[b]) ** 2)))
-                if gates is not None:
-                    gate_means_by_acc[acc_factor].append(gates.detach().mean().item())
-                    gate_vectors_by_acc[acc_factor].append(gates.detach().cpu().numpy())
+                if gate_vectors is not None:
+                    gate_means_by_acc[acc_factor].append(float(gate_means[b]))
+                    gate_vectors_by_acc[acc_factor].append(gate_vectors[b])
                 volume_key = (fnames[b], acc_factor)
                 volume_predictions.setdefault(volume_key, []).append((int(slices[b]), output_np[b]))
                 volume_targets.setdefault(volume_key, []).append((int(slices[b]), target_np[b]))
@@ -405,7 +450,7 @@ def visualize(args, epoch, model, data_loader, writer, datasettype_string, mask_
             us_input = us_input.float()
             target = target.float()
             if mask_bank is not None:
-                output, _ = forward_with_lora_gates(
+                output, _ = forward_with_grouped_lora_gates(
                     model, us_input, input_kspace, mask, acc_idx, acc_factors
                 )
             else:
