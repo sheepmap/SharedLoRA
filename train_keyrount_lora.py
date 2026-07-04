@@ -46,8 +46,10 @@ class LoRAGateNet(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(64, n_lora),
         )
+        # Keep the gate input-to-output mapping simple at initialization while
+        # avoiding the gate=0, LoRA-delta=0 dead start that blocks gradients.
         nn.init.zeros_(self.mlp[-1].weight)
-        nn.init.zeros_(self.mlp[-1].bias)
+        nn.init.ones_(self.mlp[-1].bias)
 
     def forward(self, x):
         if x.dim() == 0:
