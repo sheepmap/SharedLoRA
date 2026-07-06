@@ -1,38 +1,15 @@
 import argparse
 import pathlib
+import re
 from argparse import ArgumentParser
 
 import h5py
 import numpy as np
+from runstats import Statistics
 #from skimage.measure import compare_psnr, compare_ssim
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 from skimage.filters import laplace
 from tqdm import tqdm
-
-
-class Statistics:
-    """Lightweight running mean/std tracker to avoid external runstats dependency."""
-
-    def __init__(self):
-        self.count = 0
-        self.mean_value = 0.0
-        self.m2 = 0.0
-
-    def push(self, value):
-        value = float(value)
-        self.count += 1
-        delta = value - self.mean_value
-        self.mean_value += delta / self.count
-        delta2 = value - self.mean_value
-        self.m2 += delta * delta2
-
-    def mean(self):
-        return self.mean_value if self.count else 0.0
-
-    def stddev(self):
-        if self.count < 2:
-            return 0.0
-        return float(np.sqrt(self.m2 / (self.count - 1)))
 
 # adding hfn metric 
 def hfn(gt,pred):
@@ -84,6 +61,74 @@ METRIC_FUNCS = dict(
     SSIM=ssim,
     HFN=hfn
 )
+METRIC_NAMES = sorted(METRIC_FUNCS)
+
+
+def format_metric_summary(means, stddevs=None):
+    if stddevs is None:
+        return ' '.join(
+            f'{name} = {means[name]:.4g}' for name in METRIC_NAMES
+        )
+
+    return ' '.join(
+        f'{name} = {means[name]:.4g} +/- {2 * stddevs[name]:.4g}'
+        for name in METRIC_NAMES
+    )
+
+
+def parse_metric_means(report_line):
+    means = {}
+    number_pattern = r'([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)'
+
+    for name in METRIC_NAMES:
+        match = re.search(rf'{name}\s*=\s*{number_pattern}', report_line)
+        if match is None:
+            return None
+        means[name] = float(match.group(1))
+
+    return means
+
+
+def write_aggregated_report(report_file, acc_factor, metrics_report):
+    current_line = f'[{acc_factor}]   {metrics_report}'
+    report_lines = []
+
+    if report_file.exists():
+        report_lines = [
+            line.strip() for line in report_file.read_text(encoding='utf-8').splitlines()
+            if line.strip()
+        ]
+
+    updated_lines = []
+    replaced_current = False
+
+    for line in report_lines:
+        if line.startswith('[AVG]'):
+            continue
+        if line.startswith(f'[{acc_factor}]'):
+            if not replaced_current:
+                updated_lines.append(current_line)
+                replaced_current = True
+            continue
+        updated_lines.append(line)
+
+    if not replaced_current:
+        updated_lines.append(current_line)
+
+    metric_rows = []
+    for line in updated_lines:
+        parsed_means = parse_metric_means(line)
+        if parsed_means is not None:
+            metric_rows.append(parsed_means)
+
+    if metric_rows:
+        overall_means = {
+            name: float(np.mean([row[name] for row in metric_rows]))
+            for name in METRIC_NAMES
+        }
+        updated_lines.append(f'[AVG]   {format_metric_summary(overall_means)}')
+
+    report_file.write_text('\n'.join(updated_lines), encoding='utf-8')
 
 
 class Metrics:
@@ -124,10 +169,7 @@ class Metrics:
     def get_report(self):
         means = self.means()
         stddevs = self.stddevs()
-        metric_names = sorted(list(means))
-        return ' '.join(
-            f'{name} = {means[name]:.4g} +/- {2 * stddevs[name]:.4g}' for name in metric_names
-        )
+        return format_metric_summary(means, stddevs)
 
 
 
@@ -179,15 +221,9 @@ if __name__ == '__main__':
     report_file.parent.mkdir(parents=True, exist_ok=True)
 
     if args.report_file_acc_factor is None:
-        write_mode = 'w'
-        report_content = metrics_report
+        with open(report_file, 'w', encoding='utf-8') as f:
+            f.write(metrics_report)
     else:
-        write_mode = 'w' if args.acc_factor == report_acc_factor else 'a'
-        report_content = '[{}]   {}'.format(args.acc_factor, metrics_report)
-        if write_mode == 'a' and report_file.exists() and report_file.stat().st_size > 0:
-            report_content = '\n' + report_content
-
-    with open(report_file, write_mode) as f:
-        f.write(report_content)
+        write_aggregated_report(report_file, args.acc_factor, metrics_report)
 
     #print(metrics)
