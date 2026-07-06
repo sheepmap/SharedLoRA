@@ -469,6 +469,10 @@ def _make_melora_dirname(args):
     return f'r{r_str}_{target_str}'
 
 
+def use_lora_gate_net(args):
+    return bool(getattr(args, 'use_lora_gate_net', False))
+
+
 def format_eval_log(epoch, num_epochs, acc_factors, losses_by_acc, psnr_by_acc, ssim_by_acc,
                     gate_means_by_acc, gate_vectors_by_acc):
     metric_logs = []
@@ -510,7 +514,7 @@ def save_epoch_validation_log(save_dir, epoch, eval_log, summary_log):
     log_path.write_text(f'{eval_log}\n{summary_log}\n', encoding='utf-8')
 
 def save_model(args, save_dir, epoch, model, optimizer, scheduler, best_psnr, is_new_best):
-    """Save LoRA adapter, gate net, and training metadata. No base weights."""
+    """Save LoRA adapter, optional gate net, and training metadata. No base weights."""
     lora_state = {k: v for k, v in model.state_dict().items()
                   if 'lora_' in k or 'lora_gate_net' in k}
 
@@ -555,18 +559,22 @@ def build_model_from_pretrained(args):
                           target_module_names=target,
                           verbose=True)
 
-    n_lora = assign_melora_gate_indices(model)
-    model.lora_gate_net = LoRAGateNet(n_lora).to(args.device)
-    logger.info(f"LoRA gate net enabled: n_lora={n_lora}")
-
     # Freeze base, only lora trainable
-    trainable_count = set_melora_trainable(model)
-    for param in model.lora_gate_net.parameters():
-        param.requires_grad = True
+    set_melora_trainable(model)
+
+    if use_lora_gate_net(args):
+        n_lora = assign_melora_gate_indices(model)
+        model.lora_gate_net = LoRAGateNet(n_lora).to(args.device)
+        for param in model.lora_gate_net.parameters():
+            param.requires_grad = True
+        logger.info(f"LoRA gate net enabled: n_lora={n_lora}")
+    else:
+        logger.info("LoRA gate net disabled: using standard ConvLoRA training")
 
     # Verify and report which params are trainable
     total_count = sum(p.numel() for p in model.parameters())
     frozen_count = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+    trainable_count = total_count - frozen_count
     trainable_names = [n for n, p in model.named_parameters() if p.requires_grad]
     frozen_sample = [n for n, p in model.named_parameters() if not p.requires_grad][:5]
 
@@ -608,18 +616,22 @@ def load_model(checkpoint_file):
                           lora_dropout=args.melora_dropout,
                           target_module_names=target,
                           verbose=True)
-    n_lora = assign_melora_gate_indices(model)
-    model.lora_gate_net = LoRAGateNet(n_lora).to(args.device)
+
+    adapter_path = pathlib.Path(checkpoint_file).parent / 'adapter.pt'
+    lora_state = torch.load(adapter_path)
+    has_gate_net_weights = any(k.startswith('lora_gate_net.') for k in lora_state.keys())
+
     set_melora_trainable(model)
-    for param in model.lora_gate_net.parameters():
-        param.requires_grad = True
+    if use_lora_gate_net(args) or has_gate_net_weights:
+        n_lora = assign_melora_gate_indices(model)
+        model.lora_gate_net = LoRAGateNet(n_lora).to(args.device)
+        for param in model.lora_gate_net.parameters():
+            param.requires_grad = True
 
     if args.data_parallel:
         model = torch.nn.DataParallel(model)
 
     # Load lora adapter (same directory as checkpoint.pt)
-    adapter_path = pathlib.Path(checkpoint_file).parent / 'adapter.pt'
-    lora_state = torch.load(adapter_path)
     model.load_state_dict(lora_state, strict=False)
 
     optimizer = build_optim(args, model.parameters())
@@ -752,6 +764,8 @@ def create_arg_parser():
                         help='dropout rate for MELoRA paths')
     parser.add_argument('--melora_target', type=str, default='',
                         help='comma-separated name substrings to target (e.g. "down_sample_layers")')
+    parser.add_argument('--use-lora-gate-net', action='store_true',
+                        help='Enable LoRA gate net conditioning; if unset, use standard ConvLoRA training')
 
     return parser
 

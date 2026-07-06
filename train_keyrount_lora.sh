@@ -20,9 +20,15 @@ MELORA_ALPHA="16"
 MELORA_DROPOUT=0.05
 # MELORA_TARGET="down_sample_layers.0,up_sample_layers"
 MELORA_TARGET="down_sample_layers.0,up_sample_layers.0.layers,up_sample_layers.1.layers,up_sample_layers.2.layers"
+USE_LORA_GATE_NET=1
 #ffn.project_out,ffn.project_in,ffn.dwconv,
 
-echo python train_keyrount_lora.py --pretrained-checkpoint ${PRETRAINED_CHECKPOINT} --batch-size ${BATCH_SIZE} --num-epochs ${NUM_EPOCHS} --lr ${LR} --device ${DEVICE} --exp-dir ${EXP_DIR} --train-path ${TRAIN_PATH} --validation-path ${VALIDATION_PATH} --dataset_type ${DATASET_TYPE} --usmask_path ${USMASK_PATH} --acceleration_factor ${ACC_FACTORS} --data_acceleration_factor ${DATA_ACC_FACTOR} --mask_type ${MASK_TYPE} --melora_r ${MELORA_R} --melora_alpha ${MELORA_ALPHA} --melora_dropout ${MELORA_DROPOUT} --melora_target ${MELORA_TARGET}
+LORA_GATE_NET_ARG=""
+if [ "${USE_LORA_GATE_NET}" = "1" ]; then
+    LORA_GATE_NET_ARG="--use-lora-gate-net"
+fi
+
+echo python train_keyrount_lora.py --pretrained-checkpoint ${PRETRAINED_CHECKPOINT} --batch-size ${BATCH_SIZE} --num-epochs ${NUM_EPOCHS} --lr ${LR} --device ${DEVICE} --exp-dir ${EXP_DIR} --train-path ${TRAIN_PATH} --validation-path ${VALIDATION_PATH} --dataset_type ${DATASET_TYPE} --usmask_path ${USMASK_PATH} --acceleration_factor ${ACC_FACTORS} --data_acceleration_factor ${DATA_ACC_FACTOR} --mask_type ${MASK_TYPE} --melora_r ${MELORA_R} --melora_alpha ${MELORA_ALPHA} --melora_dropout ${MELORA_DROPOUT} --melora_target ${MELORA_TARGET} ${LORA_GATE_NET_ARG}
 
 python train_keyrount_lora.py \
     --pretrained-checkpoint ${PRETRAINED_CHECKPOINT} \
@@ -41,4 +47,5 @@ python train_keyrount_lora.py \
     --melora_r ${MELORA_R} \
     --melora_alpha ${MELORA_ALPHA} \
     --melora_dropout ${MELORA_DROPOUT} \
-    --melora_target ${MELORA_TARGET}
+    --melora_target ${MELORA_TARGET} \
+    ${LORA_GATE_NET_ARG}
