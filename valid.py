@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 
 class LoRAGateNet(nn.Module):
-    """Predict batch-shared LoRA scales [n_lora] from an acceleration scalar."""
+    """Predict batch-shared LoRA scales [2 * n_lora] from an acceleration scalar."""
 
     def __init__(self, n_lora):
         super().__init__()
@@ -57,6 +57,19 @@ def get_inference_acceleration_value(acceleration_factor):
             f"valid.py expects a single acceleration factor, got {acceleration_factor!r}"
         )
     return parse_acceleration_factor(acc_factors[0])
+
+
+def validate_lora_gate_state(lora_state, expected_gate_dim):
+    """Reject legacy single-gate adapters with a clearer error message."""
+    gate_bias = lora_state.get('lora_gate_net.mlp.4.bias')
+    if gate_bias is None:
+        return
+    actual_gate_dim = int(gate_bias.shape[0])
+    if actual_gate_dim != expected_gate_dim:
+        raise ValueError(
+            f"LoRA gate net output dim mismatch: expected {expected_gate_dim}, got {actual_gate_dim}. "
+            "This adapter likely uses the old single-gate format and is not compatible with the new A/B gate layout."
+        )
 
 def save_reconstructions(reconstructions, out_dir):
     """
@@ -125,8 +138,9 @@ def load_model(checkpoint_file, use_lora=False, lora_path=None):
         lora_state = load_torch_checkpoint(lora_path)
         uses_gate_net = any(k.startswith('lora_gate_net.') for k in lora_state.keys())
         if uses_gate_net:
-            n_lora = assign_melora_gate_indices(model)
-            model.lora_gate_net = LoRAGateNet(n_lora).to(args.device)
+            gate_dim = assign_melora_gate_indices(model)
+            validate_lora_gate_state(lora_state, gate_dim)
+            model.lora_gate_net = LoRAGateNet(gate_dim).to(args.device)
 
         if args.data_parallel:
             model = torch.nn.DataParallel(model)

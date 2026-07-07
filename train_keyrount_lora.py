@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 class LoRAGateNet(nn.Module):
-    """Predict batch-shared LoRA scales [n_lora] from an acceleration scalar."""
+    """Predict batch-shared LoRA scales [2 * n_lora] from an acceleration scalar."""
 
     def __init__(self, n_lora):
         super().__init__()
@@ -70,6 +70,37 @@ def parse_acceleration_factor(acc_factor):
     if match is None:
         raise ValueError(f"Unable to parse acceleration factor from {acc_factor!r}")
     return float(match.group(0))
+
+
+def split_ab_gate_tensor(gates):
+    """Split LoRA gate tensor into A/B views with the same leading dims."""
+    if gates.shape[-1] % 2 != 0:
+        raise ValueError(f"Expected an even gate dimension, got {tuple(gates.shape)}")
+    return gates[..., 0::2], gates[..., 1::2]
+
+
+def get_ab_gate_mean_values(gates):
+    """Return overall, A-only, and B-only gate means for tensor or ndarray gates."""
+    if torch.is_tensor(gates):
+        a_gates, b_gates = split_ab_gate_tensor(gates)
+        return gates.mean().item(), a_gates.mean().item(), b_gates.mean().item()
+
+    a_gates = gates[..., 0::2]
+    b_gates = gates[..., 1::2]
+    return float(np.mean(gates)), float(np.mean(a_gates)), float(np.mean(b_gates))
+
+
+def validate_lora_gate_state(lora_state, expected_gate_dim):
+    """Reject legacy single-gate adapters with a clearer error message."""
+    gate_bias = lora_state.get('lora_gate_net.mlp.4.bias')
+    if gate_bias is None:
+        return
+    actual_gate_dim = int(gate_bias.shape[0])
+    if actual_gate_dim != expected_gate_dim:
+        raise ValueError(
+            f"LoRA gate net output dim mismatch: expected {expected_gate_dim}, got {actual_gate_dim}. "
+            "This adapter likely uses the old single-gate format and is not compatible with the new A/B gate layout."
+        )
 
 
 def get_batch_acceleration_value(acc_idx, acc_factors):
@@ -270,20 +301,27 @@ def train_epoch(args, epoch, model, data_loader, optimizer, scheduler, writer,
         )
         writer.add_scalar('TrainLoss', loss.item(), global_step + iter)
         if gates is not None:
-            writer.add_scalar('TrainScaleMean', gates.detach().mean().item(), global_step + iter)
-            writer.add_scalar(f'TrainScaleMean/{batch_acc_factor}', gates.detach().mean().item(), global_step + iter)
+            gate_mean, a_gate_mean, b_gate_mean = get_ab_gate_mean_values(gates.detach())
+            writer.add_scalar('TrainScaleMean', gate_mean, global_step + iter)
+            writer.add_scalar(f'TrainScaleMean/{batch_acc_factor}', gate_mean, global_step + iter)
+            writer.add_scalar('TrainAScaleMean', a_gate_mean, global_step + iter)
+            writer.add_scalar(f'TrainAScaleMean/{batch_acc_factor}', a_gate_mean, global_step + iter)
+            writer.add_scalar('TrainBScaleMean', b_gate_mean, global_step + iter)
+            writer.add_scalar(f'TrainBScaleMean/{batch_acc_factor}', b_gate_mean, global_step + iter)
         writer.add_scalar(f'TrainLoss/{batch_acc_factor}', loss.item(), global_step + iter)
 
         if iter % args.report_interval == 0:
             gate_log = ''
             if gates is not None:
-                gate_mean = gates.detach().mean().item()
+                gate_mean, a_gate_mean, b_gate_mean = get_ab_gate_mean_values(gates.detach())
                 gate_values = json.dumps(
                     [round(v, 4) for v in gates.detach().cpu().tolist()],
                     ensure_ascii=True,
                 )
                 gate_log = (
                     f' ScaleMean[{batch_acc_factor}] = {gate_mean:.4g} '
+                    f'AScaleMean[{batch_acc_factor}] = {a_gate_mean:.4g} '
+                    f'BScaleMean[{batch_acc_factor}] = {b_gate_mean:.4g} '
                     f'Scales[{batch_acc_factor}] = {gate_values} '
                 )
             avg_loss_log = ' '.join(
@@ -310,6 +348,8 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
     psnr_list = []
     ssim_list = []
     gate_means_by_acc = {acc: [] for acc in acc_factors}
+    a_gate_means_by_acc = {acc: [] for acc in acc_factors}
+    b_gate_means_by_acc = {acc: [] for acc in acc_factors}
     gate_vectors_by_acc = {acc: [] for acc in acc_factors}
     losses_by_acc = {acc: [] for acc in acc_factors}
     psnr_by_acc = {acc: [] for acc in acc_factors}
@@ -340,6 +380,8 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
             target_np = target.detach().cpu().numpy().squeeze(1)
             gate_vectors = None
             gate_means = None
+            a_gate_means = None
+            b_gate_means = None
             if gates is not None:
                 gates_cpu = gates.detach().cpu()
                 if gates_cpu.dim() == 1:
@@ -347,11 +389,15 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
                 else:
                     gate_vectors = gates_cpu.numpy()
                 gate_means = gate_vectors.mean(axis=1)
+                a_gate_means = gate_vectors[:, 0::2].mean(axis=1)
+                b_gate_means = gate_vectors[:, 1::2].mean(axis=1)
             for b in range(output_np.shape[0]):
                 acc_factor = acc_factors[acc_idx[b].item() if hasattr(acc_idx[b], 'item') else acc_idx[b]]
                 losses_by_acc[acc_factor].append(float(np.mean((output_np[b] - target_np[b]) ** 2)))
                 if gate_vectors is not None:
                     gate_means_by_acc[acc_factor].append(float(gate_means[b]))
+                    a_gate_means_by_acc[acc_factor].append(float(a_gate_means[b]))
+                    b_gate_means_by_acc[acc_factor].append(float(b_gate_means[b]))
                     gate_vectors_by_acc[acc_factor].append(gate_vectors[b])
                 volume_key = (fnames[b], acc_factor)
                 volume_predictions.setdefault(volume_key, []).append((int(slices[b]), output_np[b]))
@@ -398,9 +444,13 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
             if gate_means_by_acc[acc_factor]:
                 acc_gate_mean = float(np.mean(gate_means_by_acc[acc_factor]))
                 writer.add_scalar(f'Dev_ScaleMean/{acc_factor}', acc_gate_mean, epoch)
+            if a_gate_means_by_acc[acc_factor]:
+                writer.add_scalar(f'Dev_AScaleMean/{acc_factor}', float(np.mean(a_gate_means_by_acc[acc_factor])), epoch)
+            if b_gate_means_by_acc[acc_factor]:
+                writer.add_scalar(f'Dev_BScaleMean/{acc_factor}', float(np.mean(b_gate_means_by_acc[acc_factor])), epoch)
         eval_log = format_eval_log(
             epoch, args.num_epochs, acc_factors, losses_by_acc, psnr_by_acc, ssim_by_acc,
-            gate_means_by_acc, gate_vectors_by_acc,
+            gate_means_by_acc, a_gate_means_by_acc, b_gate_means_by_acc, gate_vectors_by_acc,
         )
         logging.info(eval_log)
 
@@ -474,7 +524,7 @@ def use_lora_gate_net(args):
 
 
 def format_eval_log(epoch, num_epochs, acc_factors, losses_by_acc, psnr_by_acc, ssim_by_acc,
-                    gate_means_by_acc, gate_vectors_by_acc):
+                    gate_means_by_acc, a_gate_means_by_acc, b_gate_means_by_acc, gate_vectors_by_acc):
     metric_logs = []
     gate_logs = []
     for acc_factor in acc_factors:
@@ -489,6 +539,8 @@ def format_eval_log(epoch, num_epochs, acc_factors, losses_by_acc, psnr_by_acc, 
             metric_logs.append(f'SSIM[{acc_factor}] = {acc_ssim_mean:.4g}')
         if gate_means_by_acc[acc_factor]:
             acc_gate_mean = float(np.mean(gate_means_by_acc[acc_factor]))
+            acc_a_gate_mean = float(np.mean(a_gate_means_by_acc[acc_factor]))
+            acc_b_gate_mean = float(np.mean(b_gate_means_by_acc[acc_factor]))
             if gate_vectors_by_acc[acc_factor]:
                 gate_vector_mean = np.mean(np.stack(gate_vectors_by_acc[acc_factor], axis=0), axis=0)
                 gate_vector_str = json.dumps(
@@ -497,10 +549,16 @@ def format_eval_log(epoch, num_epochs, acc_factors, losses_by_acc, psnr_by_acc, 
                 )
                 gate_logs.append(
                     f'ScaleMean[{acc_factor}] = {acc_gate_mean:.4g} '
+                    f'AScaleMean[{acc_factor}] = {acc_a_gate_mean:.4g} '
+                    f'BScaleMean[{acc_factor}] = {acc_b_gate_mean:.4g} '
                     f'ScaleVecMean[{acc_factor}] = {gate_vector_str}'
                 )
             else:
-                gate_logs.append(f'ScaleMean[{acc_factor}] = {acc_gate_mean:.4g}')
+                gate_logs.append(
+                    f'ScaleMean[{acc_factor}] = {acc_gate_mean:.4g} '
+                    f'AScaleMean[{acc_factor}] = {acc_a_gate_mean:.4g} '
+                    f'BScaleMean[{acc_factor}] = {acc_b_gate_mean:.4g}'
+                )
 
     parts = metric_logs + gate_logs
     prefix = f'Eval Epoch = [{epoch:3d}/{num_epochs:3d}]'
@@ -563,11 +621,11 @@ def build_model_from_pretrained(args):
     set_melora_trainable(model)
 
     if use_lora_gate_net(args):
-        n_lora = assign_melora_gate_indices(model)
-        model.lora_gate_net = LoRAGateNet(n_lora).to(args.device)
+        gate_dim = assign_melora_gate_indices(model)
+        model.lora_gate_net = LoRAGateNet(gate_dim).to(args.device)
         for param in model.lora_gate_net.parameters():
             param.requires_grad = True
-        logger.info(f"LoRA gate net enabled: n_lora={n_lora}")
+        logger.info(f"LoRA gate net enabled: n_lora={gate_dim // 2}, gate_dim={gate_dim}")
     else:
         logger.info("LoRA gate net disabled: using standard ConvLoRA training")
 
@@ -623,8 +681,9 @@ def load_model(checkpoint_file):
 
     set_melora_trainable(model)
     if use_lora_gate_net(args) or has_gate_net_weights:
-        n_lora = assign_melora_gate_indices(model)
-        model.lora_gate_net = LoRAGateNet(n_lora).to(args.device)
+        gate_dim = assign_melora_gate_indices(model)
+        validate_lora_gate_state(lora_state, gate_dim)
+        model.lora_gate_net = LoRAGateNet(gate_dim).to(args.device)
         for param in model.lora_gate_net.parameters():
             param.requires_grad = True
 

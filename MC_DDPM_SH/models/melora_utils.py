@@ -9,6 +9,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+LORA_A_GATE_TANH_RESIDUAL = 0.1
+
 
 class MELoRAConv2d(nn.Module):
     """
@@ -81,8 +83,10 @@ class MELoRAConv2d(nn.Module):
                 self.scaling.append(0.0)
 
         self.disable_adapters = False
-        self.gate_index = None
-        self.current_gate = None
+        self.a_gate_index = None
+        self.b_gate_index = None
+        self.current_a_gate = None
+        self.current_b_gate = None
 
     def forward(self, x):
         result = self.conv(x)
@@ -95,19 +99,18 @@ class MELoRAConv2d(nn.Module):
         for i, rank in enumerate(self.r):
             if rank > 0:
                 x_seg = x[:, i * in_seg:(i + 1) * in_seg, :, :]
-                temp.append(
-                    self.lora_B[i](
-                        self.lora_A[i](
-                            self.lora_dropout_layers[i](x_seg)
-                        )
-                    ) * self.scaling[i]
-                )
+                a_out = self.lora_A[i](self.lora_dropout_layers[i](x_seg))
+                if self.current_a_gate is not None:
+                    a_gate = self.current_a_gate.to(device=a_out.device, dtype=a_out.dtype)
+                    z = a_gate * a_out
+                    a_out = z + LORA_A_GATE_TANH_RESIDUAL * torch.tanh(z)
+                temp.append(self.lora_B[i](a_out) * self.scaling[i])
 
         if temp:
             delta = torch.cat(temp, dim=1)
-            if self.current_gate is not None:
-                gate = self.current_gate.to(device=delta.device, dtype=delta.dtype)
-                delta = delta * gate
+            if self.current_b_gate is not None:
+                b_gate = self.current_b_gate.to(device=delta.device, dtype=delta.dtype)
+                delta = delta * b_gate
             result = result + delta
 
         return result
@@ -300,27 +303,36 @@ def get_melora_layers(model: nn.Module) -> List[MELoRAConv2d]:
 
 
 def assign_melora_gate_indices(model: nn.Module) -> int:
-    """Assign each MELoRA layer a stable column index in the gate vector."""
+    """Assign each MELoRA layer stable A/B indices in the gate vector."""
     layers = get_melora_layers(model)
     for idx, layer in enumerate(layers):
-        layer.gate_index = idx
-    return len(layers)
+        layer.a_gate_index = 2 * idx
+        layer.b_gate_index = 2 * idx + 1
+    return 2 * len(layers)
 
 
 def set_melora_gates(model: nn.Module, gates: torch.Tensor) -> None:
-    """Attach batch-shared gates [n_lora] to MELoRA layers for forward."""
+    """Attach batch-shared gates [2 * n_lora] to MELoRA layers for forward."""
     if gates.dim() != 1:
-        raise ValueError(f"Expected LoRA gates with shape [n_lora], got {tuple(gates.shape)}")
-    for layer in get_melora_layers(model):
-        if layer.gate_index is None:
+        raise ValueError(f"Expected LoRA gates with shape [2 * n_lora], got {tuple(gates.shape)}")
+    layers = get_melora_layers(model)
+    expected_gate_dim = 2 * len(layers)
+    if gates.numel() != expected_gate_dim:
+        raise ValueError(
+            f"Expected {expected_gate_dim} LoRA gates for {len(layers)} layers, got {gates.numel()}"
+        )
+    for layer in layers:
+        if layer.a_gate_index is None or layer.b_gate_index is None:
             raise RuntimeError("MELoRA gate indices have not been assigned")
-        layer.current_gate = gates[layer.gate_index].view(1, 1, 1, 1)
+        layer.current_a_gate = gates[layer.a_gate_index].view(1, 1, 1, 1)
+        layer.current_b_gate = gates[layer.b_gate_index].view(1, 1, 1, 1)
 
 
 def clear_melora_gates(model: nn.Module) -> None:
     """Clear gates so MELoRA layers use the standard ungated forward."""
     for layer in get_melora_layers(model):
-        layer.current_gate = None
+        layer.current_a_gate = None
+        layer.current_b_gate = None
 
 
 def get_melora_state_dict(model: nn.Module) -> dict:
