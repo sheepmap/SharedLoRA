@@ -32,22 +32,25 @@ def cartesian_mask(shape, acc):
     pdf_x = normal_pdf(Nx, 0.5/(Nx/10.)**2)
     lmda = Nx/(2.*acc)
     n_lines = int(Nx / acc)
+    effective_sample_n = min(sample_n, n_lines)
 
     # add uniform distribution
     pdf_x += lmda * 1./Nx
 
-    if sample_n:
-        pdf_x[Nx//2-sample_n//2:Nx//2+sample_n//2] = 0
+    if effective_sample_n:
+        pdf_x[Nx//2-effective_sample_n//2:Nx//2+effective_sample_n//2] = 0
         pdf_x /= np.sum(pdf_x)
-        n_lines -= sample_n
+        n_lines -= effective_sample_n
 
     mask = np.zeros((N, Nx))
     for i in range(N):
         idx = np.random.choice(Nx, n_lines, False, pdf_x)
         mask[i, idx] = 1
 
-    if sample_n:
-        mask[:, Nx//2-sample_n//2:Nx//2+sample_n//2] = 1
+    if effective_sample_n:
+        # When the acceleration is very high, this can consume all available
+        # lines and the mask becomes center-only by construction.
+        mask[:, Nx//2-effective_sample_n//2:Nx//2+effective_sample_n//2] = 1
 
     size = mask.itemsize
     mask = as_strided(mask, (N, Nx, Ny), (size * Nx, size, 0))
@@ -170,4 +173,3 @@ def CreateZeroFilledImageFn(fsimage, us_factor,mask_type):
     us_kspace = fs_kspace * mask
     usimg = np.abs(np.fft.ifft2(us_kspace,norm='ortho'))
     return usimg, mask, us_kspace
-
