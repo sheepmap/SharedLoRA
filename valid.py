@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 
 class LoRAGateNet(nn.Module):
-    """Predict batch-shared LoRA scales [2 * n_lora] from an acceleration scalar."""
+    """Predict batch-shared LoRA scales [gate_dim] from an acceleration scalar."""
 
     def __init__(self, n_lora):
         super().__init__()
@@ -59,17 +59,29 @@ def get_inference_acceleration_value(acceleration_factor):
     return parse_acceleration_factor(acc_factors[0])
 
 
-def validate_lora_gate_state(lora_state, expected_gate_dim):
-    """Reject legacy single-gate adapters with a clearer error message."""
+def validate_lora_gate_state(lora_state, expected_gate_dims):
+    """Validate gate-net output dim against supported single-gate and A/B-gate layouts."""
     gate_bias = lora_state.get('lora_gate_net.mlp.4.bias')
     if gate_bias is None:
-        return
+        return None
     actual_gate_dim = int(gate_bias.shape[0])
-    if actual_gate_dim != expected_gate_dim:
-        raise ValueError(
-            f"LoRA gate net output dim mismatch: expected {expected_gate_dim}, got {actual_gate_dim}. "
-            "This adapter likely uses the old single-gate format and is not compatible with the new A/B gate layout."
-        )
+    if actual_gate_dim in expected_gate_dims:
+        return actual_gate_dim
+    expected_gate_dim_str = ', '.join(str(dim) for dim in expected_gate_dims)
+    raise ValueError(
+        f"LoRA gate net output dim mismatch: expected one of [{expected_gate_dim_str}], got {actual_gate_dim}. "
+        "This adapter uses an unsupported gate layout for the current MELoRA layer count."
+    )
+
+
+def infer_lora_ab_gate_from_dim(actual_gate_dim, n_lora):
+    if actual_gate_dim == 2 * n_lora:
+        return True
+    if actual_gate_dim == n_lora:
+        return False
+    raise ValueError(
+        f"LoRA gate net output dim mismatch: expected {n_lora} or {2 * n_lora}, got {actual_gate_dim}."
+    )
 
 def save_reconstructions(reconstructions, out_dir):
     """
@@ -129,7 +141,7 @@ def load_model(checkpoint_file, use_lora=False, lora_path=None):
         melora_r = [int(x.strip()) for x in lora_args.melora_r.split(",")]
         melora_alpha = [int(x.strip()) for x in lora_args.melora_alpha.split(",")]
         target = [x.strip() for x in lora_args.melora_target.split(",")] if getattr(lora_args, 'melora_target', None) else None
-        from MC_DDPM_SH.models.melora_utils import apply_melora_to_model, assign_melora_gate_indices
+        from MC_DDPM_SH.models.melora_utils import apply_melora_to_model, assign_melora_gate_indices, get_melora_layers
         apply_melora_to_model(model, melora_r, melora_alpha,
                               lora_dropout=getattr(lora_args, 'melora_dropout', 0.0),
                               target_module_names=target,
@@ -138,8 +150,11 @@ def load_model(checkpoint_file, use_lora=False, lora_path=None):
         lora_state = load_torch_checkpoint(lora_path)
         uses_gate_net = any(k.startswith('lora_gate_net.') for k in lora_state.keys())
         if uses_gate_net:
-            gate_dim = assign_melora_gate_indices(model)
-            validate_lora_gate_state(lora_state, gate_dim)
+            n_lora = len(get_melora_layers(model))
+            actual_gate_dim = validate_lora_gate_state(lora_state, [n_lora, 2 * n_lora])
+            inferred_use_ab_gate = infer_lora_ab_gate_from_dim(actual_gate_dim, n_lora)
+            setattr(lora_args, 'use_lora_ab_gate', inferred_use_ab_gate)
+            gate_dim = assign_melora_gate_indices(model, use_lora_ab_gate=inferred_use_ab_gate)
             model.lora_gate_net = LoRAGateNet(gate_dim).to(args.device)
 
         if args.data_parallel:
@@ -148,7 +163,8 @@ def load_model(checkpoint_file, use_lora=False, lora_path=None):
         model.load_state_dict(lora_state, strict=False)
 
         if uses_gate_net:
-            print(f"MELoRA adapter with gate net loaded from {lora_path} for dynamic inference")
+            gate_mode = 'ab' if getattr(lora_args, 'use_lora_ab_gate', True) else 'single'
+            print(f"MELoRA adapter with {gate_mode} gate net loaded from {lora_path} for dynamic inference")
         else:
             for m in model.modules():
                 if hasattr(m, 'merge'):
