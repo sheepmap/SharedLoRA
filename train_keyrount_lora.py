@@ -785,11 +785,30 @@ def main(args):
     if args.resume:
         print('resuming model, batch_size', args.batch_size)
         checkpoint, model, optimizer = load_model(args.checkpoint)
-        batch_size = args.batch_size
+        runtime_batch_size = args.batch_size
+        runtime_num_epochs = args.num_epochs
+        runtime_device = args.device
+        runtime_exp_dir = args.exp_dir
+        runtime_report_interval = args.report_interval
+        runtime_data_parallel = args.data_parallel
+        runtime_checkpoint = args.checkpoint
         args = checkpoint['args']
-        args.batch_size = batch_size
+        # Keep selected runtime overrides so resume can extend training cleanly.
+        args.batch_size = runtime_batch_size
+        args.num_epochs = runtime_num_epochs
+        args.device = runtime_device
+        args.exp_dir = runtime_exp_dir
+        args.report_interval = runtime_report_interval
+        args.data_parallel = runtime_data_parallel
+        args.resume = True
+        args.checkpoint = runtime_checkpoint
         best_psnr = checkpoint.get('best_psnr', 0.)
         start_epoch = checkpoint['epoch'] + 1
+        if args.num_epochs <= start_epoch:
+            raise ValueError(
+                f"Resumed checkpoint is already at epoch {start_epoch - 1}, "
+                f"so --num-epochs must be greater than {start_epoch}. Got {args.num_epochs}."
+            )
         del checkpoint
     else:
         model = build_model_from_pretrained(args)

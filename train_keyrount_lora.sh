@@ -55,4 +55,6 @@ python train_keyrount_lora.py \
     --melora_dropout ${MELORA_DROPOUT} \
     --melora_target ${MELORA_TARGET} \
     ${LORA_GATE_NET_ARG} \
-    ${LORA_AB_GATE_ARG}
+    ${LORA_AB_GATE_ARG} \
+    --resume \
+    --checkpoint ${EXP_DIR}/melora/r8_down_sample_layers.0_up_sample_layers.0.layers_up_sample_layers.1.layers_up_sample_layers.2.layers_gate_ab/checkpoint.pt
