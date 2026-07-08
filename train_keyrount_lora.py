@@ -584,6 +584,13 @@ def _make_melora_dirname(args):
     return f'r{r_str}_{target_str}_gate_{gate_mode}'
 
 
+def resolve_melora_dir(args):
+    """Use checkpoint parent on resume so renamed experiment folders keep working."""
+    if getattr(args, 'resume', False) and getattr(args, 'checkpoint', None):
+        return pathlib.Path(args.checkpoint).parent
+    return args.exp_dir / 'melora' / _make_melora_dirname(args)
+
+
 def use_lora_gate_net(args):
     return bool(getattr(args, 'use_lora_gate_net', False))
 
@@ -818,7 +825,7 @@ def main(args):
         best_psnr = 0.
         start_epoch = 0
 
-    melora_dir = args.exp_dir / 'melora' / _make_melora_dirname(args)
+    melora_dir = resolve_melora_dir(args)
     melora_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(log_dir=str(melora_dir / 'summary'))
 
