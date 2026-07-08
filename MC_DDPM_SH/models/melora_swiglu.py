@@ -1,6 +1,6 @@
 """
-MELoRA Conv2d mode for SHFormer U-Net models.
-Based on the peft MELoRA implementation (melora.py:1014).
+MELoRA Conv2d mode for SHFormer U-Net models with a true SwiGLU A-path.
+This file is kept as a drop-in alternative to melora_utils.py.
 """
 import math
 from typing import List, Optional
@@ -16,7 +16,7 @@ class MELoRAConv2d(nn.Module):
     Splits in_channels and out_channels into l_num segments,
     each segment has its own rank for hierarchical low-rank decomposition.
 
-    output = W * x + sum_i( B_i(A_i(x_seg_i)) * scaling_i )
+    output = W * x + sum_i( B_i(SwiGLU(A_value_i(x_seg_i), A_gate_i(x_seg_i))) * scaling_i )
     """
 
     def __init__(
@@ -47,7 +47,8 @@ class MELoRAConv2d(nn.Module):
         in_seg = conv.in_channels // l_num
         out_seg = conv.out_channels // l_num
 
-        self.lora_A = nn.ModuleList()
+        self.lora_A_value = nn.ModuleList()
+        self.lora_A_gate = nn.ModuleList()
         self.lora_B = nn.ModuleList()
         self.lora_dropout_layers = nn.ModuleList()
         self.scaling = []
@@ -62,7 +63,12 @@ class MELoRAConv2d(nn.Module):
                 self.lora_dropout_layers.append(nn.Identity())
 
             if rank > 0:
-                self.lora_A.append(
+                self.lora_A_value.append(
+                    nn.Conv2d(in_seg, rank, conv.kernel_size, conv.stride,
+                              conv.padding, conv.dilation, groups=1, bias=False,
+                              device=device, dtype=dtype)
+                )
+                self.lora_A_gate.append(
                     nn.Conv2d(in_seg, rank, conv.kernel_size, conv.stride,
                               conv.padding, conv.dilation, groups=1, bias=False,
                               device=device, dtype=dtype)
@@ -73,15 +79,17 @@ class MELoRAConv2d(nn.Module):
                 )
                 self.scaling.append(lora_alpha[i] / rank)
 
-                nn.init.kaiming_uniform_(self.lora_A[-1].weight, a=math.sqrt(5))
+                nn.init.kaiming_uniform_(self.lora_A_value[-1].weight, a=math.sqrt(5))
+                nn.init.kaiming_uniform_(self.lora_A_gate[-1].weight, a=math.sqrt(5))
                 nn.init.zeros_(self.lora_B[-1].weight)
             else:
-                self.lora_A.append(None)
+                self.lora_A_value.append(None)
+                self.lora_A_gate.append(None)
                 self.lora_B.append(None)
                 self.scaling.append(0.0)
 
         self.disable_adapters = False
-        self.allow_exact_merge = True
+        self.allow_exact_merge = False
         self.use_lora_ab_gate = True
         self.gate_index = None
         self.a_gate_index = None
@@ -89,6 +97,11 @@ class MELoRAConv2d(nn.Module):
         self.current_gate = None
         self.current_a_gate = None
         self.current_b_gate = None
+
+    @property
+    def lora_A(self):
+        """Compatibility alias for callers that expect an A projection list."""
+        return self.lora_A_value
 
     def forward(self, x):
         result = self.conv(x)
@@ -101,11 +114,13 @@ class MELoRAConv2d(nn.Module):
         for i, rank in enumerate(self.r):
             if rank > 0:
                 x_seg = x[:, i * in_seg:(i + 1) * in_seg, :, :]
-                a_out = self.lora_A[i](self.lora_dropout_layers[i](x_seg))
+                dropped = self.lora_dropout_layers[i](x_seg)
+                value = self.lora_A_value[i](dropped)
+                gate = self.lora_A_gate[i](dropped)
                 if self.use_lora_ab_gate and self.current_a_gate is not None:
-                    a_gate = self.current_a_gate.to(device=a_out.device, dtype=a_out.dtype)
-                    z = a_gate * a_out
-                    a_out = F.silu(z)
+                    a_gate = self.current_a_gate.to(device=gate.device, dtype=gate.dtype)
+                    gate = a_gate * gate
+                a_out = value * F.silu(gate)
                 temp.append(self.lora_B[i](a_out) * self.scaling[i])
 
         if temp:
@@ -121,21 +136,22 @@ class MELoRAConv2d(nn.Module):
         return result
 
     def merge(self):
-        """Merge LoRA weights into the original conv weight."""
-        # Grouped convolutions (e.g. depthwise) have weight shape [out, 1, kH, kW],
-        # which is incompatible with the LoRA delta shape. Skip merge for these;
-        # the forward pass still applies LoRA correctly.
+        """
+        Merge a linear surrogate into the original conv weight.
+
+        True SwiGLU behavior is nonlinear and input-dependent, so this merge is only
+        a compatibility placeholder and is not equivalent to the forward pass.
+        """
         if self.conv.groups > 1:
             return
 
         if self.conv.weight.size(2) == 1 and self.conv.weight.size(3) == 1:
-            # 1x1 conv
             for i, rank in enumerate(self.r):
                 if rank == 0:
                     continue
                 delta = (
                     self.lora_B[i].weight.squeeze(3).squeeze(2)
-                    @ self.lora_A[i].weight.squeeze(3).squeeze(2)
+                    @ self.lora_A_value[i].weight.squeeze(3).squeeze(2)
                 ).unsqueeze(2).unsqueeze(3) * self.scaling[i]
                 out_seg = self.conv.out_channels // self.l_num
                 in_seg = self.conv.in_channels // self.l_num
@@ -144,17 +160,15 @@ class MELoRAConv2d(nn.Module):
                     i * in_seg:(i + 1) * in_seg
                 ] += delta
         else:
-            # 3x3 or larger conv
             full_in = self.conv.in_channels
             full_out = self.conv.out_channels
-            kh, kw = self.conv.weight.size(2), self.conv.weight.size(3)
             for i, rank in enumerate(self.r):
                 if rank == 0:
                     continue
                 delta = torch.einsum(
                     'or,rihw->oihw',
                     self.lora_B[i].weight.squeeze(-1).squeeze(-1),
-                    self.lora_A[i].weight,
+                    self.lora_A_value[i].weight,
                 ) * self.scaling[i]
                 out_seg = full_out // self.l_num
                 in_seg = full_in // self.l_num
@@ -164,7 +178,11 @@ class MELoRAConv2d(nn.Module):
                 ] += delta
 
     def get_delta_weight(self) -> torch.Tensor:
-        """Return the full delta weight tensor (for saving/analysis)."""
+        """
+        Return a linear surrogate delta tensor for saving/analysis.
+
+        For true SwiGLU this is not the exact forward-equivalent delta.
+        """
         full_in = self.conv.in_channels
         full_out = self.conv.out_channels
         kh, kw = self.conv.weight.size(2), self.conv.weight.size(3)
@@ -180,7 +198,7 @@ class MELoRAConv2d(nn.Module):
             delta = torch.einsum(
                 'or,rihw->oihw',
                 self.lora_B[i].weight.squeeze(-1).squeeze(-1),
-                self.lora_A[i].weight,
+                self.lora_A_value[i].weight,
             ) * self.scaling[i]
             full_delta[
                 i * out_seg:(i + 1) * out_seg,
@@ -226,19 +244,13 @@ def apply_melora_to_model(
         if not isinstance(module, nn.Conv2d):
             continue
 
-        # skip 1x1 pointwise in lora_B path (or any lora_ named module)
         if any(s in name for s in exclude_names) or "lora_" in name:
             continue
 
-        # filter by target names
         if target_module_names is not None:
             if not any(tgt in name for tgt in target_module_names):
                 continue
 
-        # skip if channels not divisible by l_num. For single-channel input
-        # layers, fall back to a single branch whose rank matches the
-        # MELoRA-equivalent ConvLoRA rank, i.e. the average rank across
-        # branches, so parameter count stays fair to the multi-branch setting.
         l_num = len(r)
         effective_r = r
         effective_alpha = lora_alpha
@@ -262,13 +274,11 @@ def apply_melora_to_model(
                 n_skipped += 1
                 continue
 
-        # get parent and attribute name to replace
         parent_name = name.rsplit(".", 1)
         if len(parent_name) == 2:
             parent_path, attr = parent_name
             parent = dict(model.named_modules())[parent_path]
         else:
-            # top-level module
             parent = model
             attr = name
 

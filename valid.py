@@ -166,14 +166,25 @@ def load_model(checkpoint_file, use_lora=False, lora_path=None):
             gate_mode = 'ab' if getattr(lora_args, 'use_lora_ab_gate', True) else 'single'
             print(f"MELoRA adapter with {gate_mode} gate net loaded from {lora_path} for dynamic inference")
         else:
+            merged_any = False
+            skipped_exact_merge = False
             for m in model.modules():
                 if hasattr(m, 'merge'):
+                    if not getattr(m, 'allow_exact_merge', True):
+                        skipped_exact_merge = True
+                        continue
                     m.merge()
+                    merged_any = True
                     # Grouped convs skip merge (weight shape incompatible),
                     # so keep their LoRA adapters active in forward pass.
                     if m.conv.groups <= 1:
                         m.disable_adapters = True
-            print(f"MELoRA adapter loaded from {lora_path} and merged for inference")
+            if skipped_exact_merge:
+                print(f"MELoRA adapter loaded from {lora_path} for dynamic inference (exact merge disabled)")
+            elif merged_any:
+                print(f"MELoRA adapter loaded from {lora_path} and merged for inference")
+            else:
+                print(f"MELoRA adapter loaded from {lora_path} for dynamic inference")
     else:
         # Original inference (no LoRA)
         if args.data_parallel:
