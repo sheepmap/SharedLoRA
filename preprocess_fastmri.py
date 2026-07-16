@@ -44,8 +44,10 @@ PROCESS_VALIDATION = True
 PROCESS_TEST = True
 
 
-# Train stores only volfs.  Validation/test store one merged HDF5 per source
-# file with img_volus_4x/kspace_volus_4x, etc.
+# Train stores only normalized volfs.  Validation/test store one merged HDF5
+# per source file with normalized img_volus_4x/kspace_volus_4x, etc.  The
+# normalization matches ixitoh5.py: each complete volume is min-max scaled to
+# [0, 1] before FFT, masking, and IFFT.
 ACC_FACTORS_TRAIN = [4]
 ACC_FACTORS_EVAL = [4, 8, 16]
 

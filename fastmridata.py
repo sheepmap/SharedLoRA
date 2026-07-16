@@ -130,11 +130,49 @@ def _load_mask(mask_base_path: Path, dataset_type: str, mask_type: str,
     return mask
 
 
-def _write_volfs(target: h5py.Dataset, rss: h5py.Dataset, slices: int) -> None:
-    """Write [S,H,W] RSS data as [H,W,S] without dtype conversion."""
+def _volume_min_max(rss: h5py.Dataset, slices: int) -> tuple[float, float]:
+    """Return the min/max over one complete RSS volume.
+
+    IXI preprocessing normalizes each complete volume, rather than each
+    individual slice.  Compute the same statistics here while keeping the
+    source HDF5 dataset slice-wise to avoid loading the whole file at once.
+    """
+
+    volume_min = np.inf
+    volume_max = -np.inf
+    for slice_index in range(slices):
+        image = np.asarray(rss[slice_index, :, :], dtype=np.float64)
+        volume_min = min(volume_min, float(image.min()))
+        volume_max = max(volume_max, float(image.max()))
+    return volume_min, volume_max
+
+
+def _normalize_slice(
+    image: np.ndarray, volume_min: float, volume_max: float
+) -> np.ndarray:
+    """Apply IXI-style per-volume min-max normalization to one slice."""
+
+    image = np.asarray(image, dtype=np.float32)
+    value_range = volume_max - volume_min
+    if value_range <= 0:
+        # IXI normally has a non-constant volume, but avoid NaNs for a
+        # degenerate input volume.
+        return np.zeros_like(image, dtype=np.float32)
+    return ((image - volume_min) / value_range).astype(np.float32, copy=False)
+
+
+def _write_volfs(
+    target: h5py.Dataset,
+    rss: h5py.Dataset,
+    slices: int,
+    volume_min: float,
+    volume_max: float,
+) -> None:
+    """Write normalized [S,H,W] RSS data as [H,W,S]."""
 
     for slice_index in range(slices):
-        target[:, :, slice_index] = rss[slice_index, :, :]
+        image = _normalize_slice(rss[slice_index, :, :], volume_min, volume_max)
+        target[:, :, slice_index] = image
 
 
 def _write_undersampled_fields(
@@ -145,8 +183,10 @@ def _write_undersampled_fields(
     width: int,
     mask: np.ndarray,
     factor: int,
+    volume_min: float,
+    volume_max: float,
 ) -> None:
-    """Generate the project-compatible validation/test fields."""
+    """Generate validation/test fields from the normalized RSS volume."""
 
     label = factor_label(factor)
     chunks = _chunk_shape(height, width, slices)
@@ -164,10 +204,9 @@ def _write_undersampled_fields(
     )
 
     for slice_index in range(slices):
-        # The source RSS data is copied as-is into volfs.  These derived
-        # validation fields intentionally use the same FFT/mask/IFFT process
-        # as ixitoh5.py and therefore have the project's expected dtypes.
-        image = np.asarray(rss[slice_index, :, :])
+        # Use the same normalized image as volfs.  The FFT/mask/IFFT process
+        # intentionally matches ixitoh5.py.
+        image = _normalize_slice(rss[slice_index, :, :], volume_min, volume_max)
         kspace = np.fft.fft2(image, norm="ortho")
         undersampled_kspace = kspace * mask
         undersampled_image = np.abs(
@@ -221,6 +260,7 @@ def process_file(
     try:
         with h5py.File(source_path, "r") as source:
             rss, slices, height, width = _validate_rss(source, source_path)
+            volume_min, volume_max = _volume_min_max(rss, slices)
             if split != "train" and mask_base_path is None:
                 raise ValueError("--mask-base-path is required for validation/test")
 
@@ -242,14 +282,17 @@ def process_file(
                 target.attrs["volfs_source"] = "reconstruction_rss"
                 target.attrs["volfs_source_layout"] = "[S,H,W]"
                 target.attrs["volfs_layout"] = "[H,W,S]"
+                target.attrs["normalization"] = "per-volume min-max to [0, 1]"
+                target.attrs["normalization_min"] = volume_min
+                target.attrs["normalization_max"] = volume_max
 
                 volfs = target.create_dataset(
                     "volfs",
                     shape=(height, width, slices),
-                    dtype=rss.dtype,
+                    dtype=np.float32,
                     chunks=_chunk_shape(height, width, slices),
                 )
-                _write_volfs(volfs, rss, slices)
+                _write_volfs(volfs, rss, slices, volume_min, volume_max)
 
                 if split != "train":
                     for factor in factors:
@@ -261,12 +304,14 @@ def process_file(
                             width,
                             masks[factor],
                             factor,
+                            volume_min,
+                            volume_max,
                         )
 
         os.replace(temp_path, output_path)
         print(
             f"[ok] {source_path.name}: volfs=({height},{width},{slices}), "
-            f"dtype={rss.dtype}, split={split}"
+            f"dtype=float32, normalized=[0,1], split={split}"
         )
         if split != "train":
             print(f"     generated factors: {', '.join(factor_label(f) for f in factors)}")
