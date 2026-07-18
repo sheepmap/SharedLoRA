@@ -10,9 +10,15 @@ BASE_PATH = 'C:/Users/admin/Desktop/1/代码/SHFormer-master'
 OUTPUT_DIR = os.path.join(BASE_PATH, 'datasets')
 MASK_BASE_PATH = BASE_PATH
 ACC_FACTORS_EVAL = [4, 8, 16]
+IXI_T2_VALID_DIR = os.path.join(
+    BASE_PATH, 'datasets', 'ixi_t2', 'cartesian', 'origintestvalid', 'valid'
+)
+IXI_T2_TEST_DIR = os.path.join(
+    BASE_PATH, 'datasets', 'ixi_t2', 'cartesian', 'origintestvalid', 'test'
+)
 
 
-def preprocess_dataset(dataset_type, input_dir, mask_type='cartesian'):
+def preprocess_dataset(dataset_type, input_dir, mask_type='cartesian', split_input_dirs=None):
     print('=' * 60)
     print(f'Start preprocessing {dataset_type} train split...')
     print('=' * 60)
@@ -38,12 +44,17 @@ def preprocess_dataset(dataset_type, input_dir, mask_type='cartesian'):
         mask_base_path=MASK_BASE_PATH,
         splits=('validation', 'test'),
         merge_eval_acc_factors=True,
+        split_input_dirs=split_input_dirs,
     )
 
 
 preprocess_dataset(
     dataset_type='ixi_t2',
     input_dir=os.path.join(BASE_PATH, 'IXI-T2'),
+    split_input_dirs={
+        'validation': IXI_T2_VALID_DIR,
+        'test': IXI_T2_TEST_DIR,
+    },
 )
 
 preprocess_dataset(

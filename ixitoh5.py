@@ -96,11 +96,15 @@ def batch_preprocess(
     mask_base_path=None,
     splits=('train', 'validation', 'test'),
     merge_eval_acc_factors=False,
+    split_input_dirs=None,
 ):
     """
     Batch preprocess IXI data.
 
     `splits` lets train and validation/test be generated independently.
+    ``split_input_dirs`` can map split names to directories that already
+    contain the complete files for each split. Without it, ``input_dir`` is
+    split internally into 80%/10%/10%.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -113,7 +117,22 @@ def batch_preprocess(
     if invalid_splits:
         raise ValueError(f'Unsupported splits: {invalid_splits}. Expected subset of {valid_splits}.')
 
-    split_to_files = _split_nifti_files(input_dir)
+    if split_input_dirs is None:
+        split_to_files = _split_nifti_files(input_dir)
+    else:
+        unknown_keys = set(split_input_dirs) - set(valid_splits)
+        if unknown_keys:
+            raise ValueError(
+                f'Unsupported split_input_dirs keys: {sorted(unknown_keys)}. '
+                f'Expected subset of {valid_splits}.'
+            )
+        split_to_files = {split: [] for split in valid_splits}
+        for split, split_dir in split_input_dirs.items():
+            if not os.path.isdir(split_dir):
+                raise FileNotFoundError(f'Input directory for {split}: {split_dir}')
+            split_to_files[split] = sorted(
+                glob.glob(os.path.join(split_dir, '*.nii.gz'))
+            )
 
     print(f"Using pre-generated masks from: {os.path.join(mask_base_path, 'usmasks')}")
     print(f'Dataset type: {dataset_type}, Mask type: {mask_type}')
