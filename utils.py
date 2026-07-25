@@ -152,9 +152,8 @@ def centered_circle(image_shape,radius):
                                                                                   
 def gaussian_mask(size,acc):
     us_mask1_1 = gaussian_pattern((size[0],size[1]),(1/acc),"2D")
-    us_mask1_2 = centered_circle((size[0],size[1]),5)
-    us_mask1_3 = np.logical_or(us_mask1_1,us_mask1_2)
-    return np.fft.fftshift(us_mask1_3).astype(float)     
+    # Pure Gaussian mask without an explicitly fully sampled center circle.
+    return np.fft.fftshift(us_mask1_1).astype(float)
 
 def CreateZeroFilledImage(fsimage, us_factor):
     fs_kspace = np.fft.fft2(fsimage, norm='ortho')
