@@ -14,15 +14,34 @@ TRAIN_PATH=${BASE_PATH}'/datasets/'
 VALIDATION_PATH=${BASE_PATH}'/datasets/'
 USMASK_PATH=${BASE_PATH}'/usmasks/'
 
-# MELoRA settings (following glue_finetune.sh style)
+# -----------------------------------------------------------------------------
+# PEFT method guide
+#   melora  : existing hierarchical LoRA baseline; LoRA gate net is supported.
+#   dora    : DoRA; trains low-rank direction updates plus output magnitudes.
+#   lora-xs : LoRA-XS; freezes SVD bases and trains only an r x r core matrix.
+#
+# For a fair main comparison, keep MELORA_TARGET, data, seed and training
+# settings unchanged across methods. DoRA and LoRA-XS must not use the gate net.
+# -----------------------------------------------------------------------------
+PEFT_METHOD="melora"  # choose: melora, dora, lora-xs
+
+# MELoRA settings
 MELORA_R="8"
 MELORA_ALPHA="16"
 MELORA_DROPOUT=0.05
 # MELORA_TARGET="down_sample_layers.0,up_sample_layers"
 MELORA_TARGET="down_sample_layers.0,up_sample_layers.0.layers,up_sample_layers.1.layers,up_sample_layers.2.layers"
 USE_LORA_GATE_NET=1
-USE_LORA_AB_GATE=1
-#ffn.project_out,ffn.project_in,ffn.dwconv,
+USE_LORA_AB_GATE=0
+
+# DoRA rank scan: 2, 4, 8. Used only when PEFT_METHOD="dora".
+DORA_RANK=8
+DORA_ALPHA=16
+DORA_DROPOUT=0.0
+
+# LoRA-XS rank scan: 4, 8, 16. Used only when PEFT_METHOD="lora-xs".
+LORA_XS_RANK=8
+LORA_XS_ALPHA=1.0
 
 LORA_GATE_NET_ARG=""
 if [ "${USE_LORA_GATE_NET}" = "1" ]; then
@@ -34,7 +53,30 @@ if [ "${USE_LORA_AB_GATE}" = "0" ]; then
     LORA_AB_GATE_ARG="--no-lora-ab-gate"
 fi
 
-echo python train_keyrount_lora.py --pretrained-checkpoint ${PRETRAINED_CHECKPOINT} --batch-size ${BATCH_SIZE} --num-epochs ${NUM_EPOCHS} --lr ${LR} --device ${DEVICE} --exp-dir ${EXP_DIR} --train-path ${TRAIN_PATH} --validation-path ${VALIDATION_PATH} --dataset_type ${DATASET_TYPE} --usmask_path ${USMASK_PATH} --acceleration_factor ${ACC_FACTORS} --data_acceleration_factor ${DATA_ACC_FACTOR} --mask_type ${MASK_TYPE} --melora_r ${MELORA_R} --melora_alpha ${MELORA_ALPHA} --melora_dropout ${MELORA_DROPOUT} --melora_target ${MELORA_TARGET} ${LORA_GATE_NET_ARG} ${LORA_AB_GATE_ARG}
+PEFT_METHOD_ARGS="--peft-method ${PEFT_METHOD}"
+PEFT_EXTRA_ARGS=""
+PEFT_GATE_ARGS=""
+case "${PEFT_METHOD}" in
+    melora)
+        PEFT_GATE_ARGS="${LORA_GATE_NET_ARG} ${LORA_AB_GATE_ARG}"
+        ;;
+    dora)
+        PEFT_EXTRA_ARGS="--adapter-rank ${DORA_RANK} --adapter-alpha ${DORA_ALPHA} --adapter-dropout ${DORA_DROPOUT}"
+        ;;
+    lora-xs)
+        PEFT_EXTRA_ARGS="--lora-xs-rank ${LORA_XS_RANK} --lora-xs-alpha ${LORA_XS_ALPHA}"
+        ;;
+    *)
+        echo "Unsupported PEFT_METHOD: ${PEFT_METHOD}. Choose melora, dora, or lora-xs." >&2
+        exit 1
+        ;;
+esac
+
+if [ "${PEFT_METHOD}" != "melora" ] && [ "${USE_LORA_GATE_NET}" = "1" ]; then
+    echo "Note: --use-lora-gate-net is omitted for ${PEFT_METHOD}; it is MELoRA-only."
+fi
+
+echo python train_keyrount_lora.py --pretrained-checkpoint ${PRETRAINED_CHECKPOINT} --batch-size ${BATCH_SIZE} --num-epochs ${NUM_EPOCHS} --lr ${LR} --device ${DEVICE} --exp-dir ${EXP_DIR} --train-path ${TRAIN_PATH} --validation-path ${VALIDATION_PATH} --dataset_type ${DATASET_TYPE} --usmask_path ${USMASK_PATH} --acceleration_factor ${ACC_FACTORS} --data_acceleration_factor ${DATA_ACC_FACTOR} --mask_type ${MASK_TYPE} ${PEFT_METHOD_ARGS} ${PEFT_EXTRA_ARGS} --melora_r ${MELORA_R} --melora_alpha ${MELORA_ALPHA} --melora_dropout ${MELORA_DROPOUT} --melora_target ${MELORA_TARGET} ${PEFT_GATE_ARGS}
 
 python train_keyrount_lora.py \
     --pretrained-checkpoint ${PRETRAINED_CHECKPOINT} \
@@ -50,11 +92,12 @@ python train_keyrount_lora.py \
     --acceleration_factor ${ACC_FACTORS} \
     --data_acceleration_factor ${DATA_ACC_FACTOR} \
     --mask_type ${MASK_TYPE} \
+    ${PEFT_METHOD_ARGS} \
+    ${PEFT_EXTRA_ARGS} \
     --melora_r ${MELORA_R} \
     --melora_alpha ${MELORA_ALPHA} \
     --melora_dropout ${MELORA_DROPOUT} \
     --melora_target ${MELORA_TARGET} \
-    ${LORA_GATE_NET_ARG} \
-    ${LORA_AB_GATE_ARG} \
-    --resume \
-    --checkpoint ${EXP_DIR}/melora/r8_down_sample_layers.0_up_sample_layers.0.layers_up_sample_layers.1.layers_up_sample_layers.2.layers_gate_ab/checkpoint.pt
+    ${PEFT_GATE_ARGS} \
+    # --resume \
+    # --checkpoint ${EXP_DIR}/melora/r8_down_sample_layers.0_up_sample_layers.0.layers_up_sample_layers.1.layers_up_sample_layers.2.layers_gate_ab/checkpoint.pt

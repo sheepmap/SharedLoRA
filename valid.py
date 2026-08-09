@@ -132,23 +132,49 @@ def load_model(checkpoint_file, use_lora=False, lora_path=None):
     model = DnCn(args,n_channels=1).to(args.device)
 
     if use_lora and lora_path is not None:
-        # LoRA inference: load base weights, apply MELoRA, load adapter, merge
+        # Adapter inference: load the frozen base, reconstruct the adapter
+        # recorded in its companion checkpoint.pt, then load adapter weights.
         model.load_state_dict(checkpoint['model'], strict=False)
 
-        # Load LoRA hyperparams from checkpoint.pt (saved alongside adapter)
+        # Load PEFT hyperparameters from checkpoint.pt (saved alongside adapter).
+        # ``peft_method`` is absent from old MELoRA checkpoints, so preserve
+        # their historical behavior by treating it as MELoRA.
         lora_chk = load_torch_checkpoint(pathlib.Path(lora_path).parent / 'checkpoint.pt')
         lora_args = lora_chk['args']
-        melora_r = [int(x.strip()) for x in lora_args.melora_r.split(",")]
-        melora_alpha = [int(x.strip()) for x in lora_args.melora_alpha.split(",")]
+        peft_method = getattr(lora_args, 'peft_method', 'melora').lower()
         target = [x.strip() for x in lora_args.melora_target.split(",")] if getattr(lora_args, 'melora_target', None) else None
-        from MC_DDPM_SH.models.melora_utils import apply_melora_to_model, assign_melora_gate_indices, get_melora_layers
-        apply_melora_to_model(model, melora_r, melora_alpha,
-                              lora_dropout=getattr(lora_args, 'melora_dropout', 0.0),
-                              target_module_names=target,
-                              verbose=True)
+        if peft_method == 'melora':
+            melora_r = [int(x.strip()) for x in lora_args.melora_r.split(",")]
+            melora_alpha = [int(x.strip()) for x in lora_args.melora_alpha.split(",")]
+            from MC_DDPM_SH.models.melora_utils import apply_melora_to_model, assign_melora_gate_indices, get_melora_layers
+            apply_melora_to_model(model, melora_r, melora_alpha,
+                                  lora_dropout=getattr(lora_args, 'melora_dropout', 0.0),
+                                  target_module_names=target,
+                                  verbose=True)
+        elif peft_method in ('dora', 'lora-xs'):
+            from MC_DDPM_SH.models.conv_peft import apply_conv_peft
+            if peft_method == 'dora':
+                rank = getattr(lora_args, 'adapter_rank', 8)
+                alpha = getattr(lora_args, 'adapter_alpha', 16.0)
+                dropout = getattr(lora_args, 'adapter_dropout', 0.0)
+            else:
+                rank = getattr(lora_args, 'lora_xs_rank', 8)
+                alpha = getattr(lora_args, 'lora_xs_alpha', 1.0)
+                dropout = 0.0
+            apply_conv_peft(
+                model, peft_method, rank=rank, alpha=alpha, dropout=dropout,
+                target_module_names=target, verbose=True,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported adapter method {peft_method!r} in "
+                f"{pathlib.Path(lora_path).parent / 'checkpoint.pt'}"
+            )
 
         lora_state = load_torch_checkpoint(lora_path)
         uses_gate_net = any(k.startswith('lora_gate_net.') for k in lora_state.keys())
+        if uses_gate_net and peft_method != 'melora':
+            raise ValueError(f"LoRA gate net is unsupported for {peft_method} adapters")
         if uses_gate_net:
             n_lora = len(get_melora_layers(model))
             actual_gate_dim = validate_lora_gate_state(lora_state, [n_lora, 2 * n_lora])
@@ -165,7 +191,7 @@ def load_model(checkpoint_file, use_lora=False, lora_path=None):
         if uses_gate_net:
             gate_mode = 'ab' if getattr(lora_args, 'use_lora_ab_gate', True) else 'single'
             print(f"MELoRA adapter with {gate_mode} gate net loaded from {lora_path} for dynamic inference")
-        else:
+        elif peft_method == 'melora':
             merged_any = False
             skipped_exact_merge = False
             for m in model.modules():
@@ -185,6 +211,11 @@ def load_model(checkpoint_file, use_lora=False, lora_path=None):
                 print(f"MELoRA adapter loaded from {lora_path} and merged for inference")
             else:
                 print(f"MELoRA adapter loaded from {lora_path} for dynamic inference")
+        else:
+            # DoRA and LoRA-XS are kept as dynamic wrappers. Their adapters
+            # remain active in forward rather than being merged and applied a
+            # second time by their wrapper modules.
+            print(f"{peft_method} adapter loaded from {lora_path} for dynamic inference")
     else:
         # Original inference (no LoRA)
         if args.data_parallel:
@@ -279,10 +310,10 @@ def create_arg_parser():
     parser.add_argument('--dataset_type',type=str,help='cardiac,kirby')
     parser.add_argument('--usmask_path',type=str,help='undersampling mask path')
     parser.add_argument('--mask_type',type=str,help='mask type - cartesian, gaussian')
-    parser.add_argument('--use_lora', action='store_true', default=False,
-                        help='If set, load a LoRA adapter and merge for inference')
-    parser.add_argument('--lora_path', type=pathlib.Path, default=None,
-                        help='Path to the LoRA adapter .pt file (required when --use_lora is set)')
+    parser.add_argument('--use_lora', '--use-adapter', dest='use_lora', action='store_true', default=False,
+                        help='Load a MELoRA, DoRA, or LoRA-XS adapter for inference')
+    parser.add_argument('--lora_path', '--adapter-path', dest='lora_path', type=pathlib.Path, default=None,
+                        help='Path to adapter.pt or adapter_best.pt (required with --use_lora)')
 
     return parser
 

@@ -24,6 +24,11 @@ from MC_DDPM_SH.models.melora_utils import (
     set_melora_gates,
     set_melora_trainable,
 )
+from MC_DDPM_SH.models.conv_peft import (
+    apply_conv_peft,
+    get_conv_peft_layers,
+    set_conv_peft_trainable,
+)
 import torchvision
 from torch import nn
 from torch.autograd import Variable
@@ -576,19 +581,37 @@ def visualize(args, epoch, model, data_loader, writer, datasettype_string, mask_
             save_image(torch.abs(target.float() - output.float()), 'Error_{}'.format(datasettype_string))
             break
 
-def _make_melora_dirname(args):
-    """Build subdirectory name from MELORA_R and MELORA_TARGET."""
-    r_str = args.melora_r.replace(',', '_')
+def get_peft_method(args):
+    """Return the adapter method, preserving compatibility with old checkpoints."""
+    return getattr(args, 'peft_method', 'melora').lower()
+
+
+def _make_peft_dirname(args):
+    """Build a method-specific, reproducible adapter experiment directory name."""
+    method = get_peft_method(args)
     target_str = args.melora_target.replace(',', '_') if args.melora_target else 'all'
-    gate_mode = get_gate_mode_name(use_lora_ab_gate(args))
-    return f'r{r_str}_{target_str}_gate_{gate_mode}'
+    if method == 'melora':
+        r_str = args.melora_r.replace(',', '_')
+        # Keep the legacy MELoRA path spelling so existing shell commands and
+        # checkpoints continue to resolve to the same experiment directory.
+        gate_mode = get_gate_mode_name(use_lora_ab_gate(args))
+        return f'r{r_str}_{target_str}_gate_{gate_mode}'
+    if method == 'dora':
+        return f'r{args.adapter_rank}_{target_str}_alpha_{args.adapter_alpha:g}'
+    if method == 'lora-xs':
+        return f'r{args.lora_xs_rank}_{target_str}_alpha_{args.lora_xs_alpha:g}'
+    raise ValueError(f"Unsupported PEFT method: {method}")
 
 
-def resolve_melora_dir(args):
+def resolve_peft_dir(args):
     """Use checkpoint parent on resume so renamed experiment folders keep working."""
     if getattr(args, 'resume', False) and getattr(args, 'checkpoint', None):
         return pathlib.Path(args.checkpoint).parent
-    return args.exp_dir / 'melora' / _make_melora_dirname(args)
+    method = get_peft_method(args)
+    # Preserve the existing MELoRA output location for backwards-compatible
+    # training commands; new methods are grouped under ``peft``.
+    root = 'melora' if method == 'melora' else f'peft/{method}'
+    return args.exp_dir / root / _make_peft_dirname(args)
 
 
 def use_lora_gate_net(args):
@@ -651,9 +674,10 @@ def save_epoch_validation_log(save_dir, epoch, eval_log, summary_log):
     log_path.write_text(f'{eval_log}\n{summary_log}\n', encoding='utf-8')
 
 def save_model(args, save_dir, epoch, model, optimizer, scheduler, best_psnr, is_new_best):
-    """Save LoRA adapter, optional gate net, and training metadata. No base weights."""
-    lora_state = {k: v for k, v in model.state_dict().items()
-                  if 'lora_' in k or 'lora_gate_net' in k}
+    """Save the trainable adapter and training metadata, never base weights."""
+    trainable_names = {name for name, parameter in model.named_parameters() if parameter.requires_grad}
+    state_dict = model.state_dict()
+    lora_state = {name: state_dict[name] for name in trainable_names}
 
     # Checkpoint: training metadata only, for resume
     torch.save(
@@ -667,60 +691,96 @@ def save_model(args, save_dir, epoch, model, optimizer, scheduler, best_psnr, is
         f=save_dir / 'checkpoint.pt'
     )
 
-    # Adapter: LoRA and gate-net weights only
+    # Adapter: trainable PEFT parameters only.
     torch.save(lora_state, f=save_dir / 'adapter.pt')
+    adapter_numel = sum(tensor.numel() for tensor in lora_state.values())
+    adapter_bytes = sum(tensor.numel() * tensor.element_size() for tensor in lora_state.values())
+    logger.info(
+        f"Saved {get_peft_method(args)} adapter: {adapter_numel:,} trainable parameters, "
+        f"{adapter_bytes / (1024 ** 2):.3f} MiB -> {save_dir / 'adapter.pt'}"
+    )
 
     if is_new_best:
         shutil.copyfile(save_dir / 'adapter.pt', save_dir / 'adapter_best.pt')
 
 
-def build_model_from_pretrained(args):
-    """Load pretrained base weights, apply MELoRA, freeze base, return model with only lora trainable."""
-    # Load pretrained base model
-    pretrained = load_torch_checkpoint(args.pretrained_checkpoint)
-    base_state = pretrained['model']
+def _target_module_names(args):
+    return [name.strip() for name in args.melora_target.split(',') if name.strip()] if args.melora_target else None
 
-    # Create model and load base weights
-    model = DnCn(args, n_channels=1).to(args.device)
-    model.load_state_dict(base_state, strict=True)
 
-    # Apply MELoRA
-    melora_r = [int(x.strip()) for x in args.melora_r.split(",")]
-    melora_alpha = [int(x.strip()) for x in args.melora_alpha.split(",")]
-    assert len(melora_r) == len(melora_alpha), \
-        f"melora_r len ({len(melora_r)}) != melora_alpha len ({len(melora_alpha)})"
-    target = [x.strip() for x in args.melora_target.split(",")] if args.melora_target else None
-    logger.info(f"applying MELoRA Conv2d: r={melora_r}, alpha={melora_alpha}, target={target}")
-    apply_melora_to_model(model, melora_r, melora_alpha,
-                          lora_dropout=args.melora_dropout,
-                          target_module_names=target,
-                          verbose=True)
-
-    # Freeze base, only lora trainable
-    set_melora_trainable(model)
+def configure_peft_model(model, args, adapter_state=None):
+    """Inject the selected adapter and make its parameters trainable."""
+    method = get_peft_method(args)
+    target = _target_module_names(args)
+    if method == 'melora':
+        melora_r = [int(x.strip()) for x in args.melora_r.split(",")]
+        melora_alpha = [int(x.strip()) for x in args.melora_alpha.split(",")]
+        if len(melora_r) != len(melora_alpha):
+            raise ValueError(
+                f"melora_r len ({len(melora_r)}) != melora_alpha len ({len(melora_alpha)})"
+            )
+        logger.info(f"applying MELoRA Conv2d: r={melora_r}, alpha={melora_alpha}, target={target}")
+        apply_melora_to_model(
+            model, melora_r, melora_alpha, lora_dropout=args.melora_dropout,
+            target_module_names=target, verbose=True,
+        )
+        set_melora_trainable(model)
+        has_gate_net_weights = adapter_state is not None and any(
+            key.startswith('lora_gate_net.') for key in adapter_state
+        )
+        if use_lora_gate_net(args) or has_gate_net_weights:
+            n_lora = len([module for module in model.modules() if 'MELoRAConv2d' in type(module).__name__])
+            use_ab_gate = (
+                infer_use_lora_ab_gate(args, adapter_state, n_lora)
+                if has_gate_net_weights else use_lora_ab_gate(args)
+            )
+            gate_dim = assign_melora_gate_indices(model, use_lora_ab_gate=use_ab_gate)
+            model.lora_gate_net = LoRAGateNet(gate_dim).to(args.device)
+            for parameter in model.lora_gate_net.parameters():
+                parameter.requires_grad = True
+            logger.info(
+                f"LoRA gate net enabled: gate_mode={get_gate_mode_name(use_ab_gate)}, "
+                f"n_lora={n_lora}, gate_dim={gate_dim}"
+            )
+        else:
+            logger.info("LoRA gate net disabled: using standard MELoRA training")
+        return model
 
     if use_lora_gate_net(args):
-        gate_dim = assign_melora_gate_indices(model, use_lora_ab_gate=use_lora_ab_gate(args))
-        model.lora_gate_net = LoRAGateNet(gate_dim).to(args.device)
-        for param in model.lora_gate_net.parameters():
-            param.requires_grad = True
-        n_lora = len([module for module in model.modules() if 'MELoRAConv2d' in type(module).__name__])
-        logger.info(
-            f"LoRA gate net enabled: gate_mode={get_gate_mode_name(use_lora_ab_gate(args))}, "
-            f"n_lora={n_lora}, gate_dim={gate_dim}"
+        raise ValueError(
+            f"--use-lora-gate-net is currently supported only for MELoRA, not {method}. "
+            "Disable it for fair DoRA/LoRA-XS comparisons."
         )
+    if method == 'dora':
+        rank = getattr(args, 'adapter_rank', 8)
+        alpha = getattr(args, 'adapter_alpha', 16.0)
+        dropout = getattr(args, 'adapter_dropout', 0.0)
+    elif method == 'lora-xs':
+        rank = getattr(args, 'lora_xs_rank', 8)
+        alpha = getattr(args, 'lora_xs_alpha', 1.0)
+        dropout = 0.0
     else:
-        logger.info("LoRA gate net disabled: using standard ConvLoRA training")
+        raise ValueError(f"Unsupported PEFT method: {method}")
+    logger.info(f"applying {method} Conv2d adapter: r={rank}, alpha={alpha}, target={target}")
+    apply_conv_peft(
+        model, method, rank=rank, alpha=alpha, dropout=dropout,
+        target_module_names=target, verbose=True,
+    )
+    set_conv_peft_trainable(model)
+    logger.info(f"{method} adapter enabled: n_lora_layers={len(list(get_conv_peft_layers(model)))}")
+    return model
 
-    # Verify and report which params are trainable
-    total_count = sum(p.numel() for p in model.parameters())
-    frozen_count = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+
+def _log_trainable_parameters(model, method):
+    """Verify and report the frozen-base PEFT parameter split."""
+    total_count = sum(parameter.numel() for parameter in model.parameters())
+    frozen_count = sum(parameter.numel() for parameter in model.parameters() if not parameter.requires_grad)
     trainable_count = total_count - frozen_count
-    trainable_names = [n for n, p in model.named_parameters() if p.requires_grad]
-    frozen_sample = [n for n, p in model.named_parameters() if not p.requires_grad][:5]
+    trainable_names = [name for name, parameter in model.named_parameters() if parameter.requires_grad]
+    frozen_sample = [name for name, parameter in model.named_parameters() if not parameter.requires_grad][:5]
 
     logger.info(f"{'='*60}")
-    logger.info(f"MELoRA verification:")
+    logger.info(f"{method} verification:")
     logger.info(f"  Total     params: {total_count:,}")
     logger.info(f"  Frozen    params: {frozen_count:,} ({frozen_count/total_count*100:.1f}%)")
     logger.info(f"  Trainable params: {trainable_count:,} ({trainable_count/total_count*100:.1f}%)")
@@ -734,11 +794,20 @@ def build_model_from_pretrained(args):
         logger.info(f"    鉁?{n}")
     logger.info(f"{'='*60}")
 
+
+def build_model_from_pretrained(args):
+    """Load a frozen base checkpoint and inject the selected PEFT method."""
+    pretrained = load_torch_checkpoint(args.pretrained_checkpoint)
+    model = DnCn(args, n_channels=1).to(args.device)
+    model.load_state_dict(pretrained['model'], strict=True)
+    configure_peft_model(model, args)
+    _log_trainable_parameters(model, get_peft_method(args))
+
     return model
 
 
 def load_model(checkpoint_file):
-    """Resume from a LoRA checkpoint.pt (metadata only, no model weights)."""
+    """Resume from a PEFT checkpoint containing metadata and an adapter only."""
     checkpoint = load_torch_checkpoint(checkpoint_file)
     args = checkpoint['args']
 
@@ -749,27 +818,10 @@ def load_model(checkpoint_file):
     model = DnCn(args, n_channels=1).to(args.device)
     model.load_state_dict(base_state, strict=True)
 
-    # Apply MELoRA
-    melora_r = [int(x.strip()) for x in args.melora_r.split(",")]
-    melora_alpha = [int(x.strip()) for x in args.melora_alpha.split(",")]
-    target = [x.strip() for x in args.melora_target.split(",")] if args.melora_target else None
-    apply_melora_to_model(model, melora_r, melora_alpha,
-                          lora_dropout=args.melora_dropout,
-                          target_module_names=target,
-                          verbose=True)
-
     adapter_path = pathlib.Path(checkpoint_file).parent / 'adapter.pt'
     lora_state = load_torch_checkpoint(adapter_path)
-    has_gate_net_weights = any(k.startswith('lora_gate_net.') for k in lora_state.keys())
-
-    set_melora_trainable(model)
-    if use_lora_gate_net(args) or has_gate_net_weights:
-        n_lora = len([module for module in model.modules() if 'MELoRAConv2d' in type(module).__name__])
-        inferred_use_ab_gate = infer_use_lora_ab_gate(args, lora_state, n_lora)
-        gate_dim = assign_melora_gate_indices(model, use_lora_ab_gate=inferred_use_ab_gate)
-        model.lora_gate_net = LoRAGateNet(gate_dim).to(args.device)
-        for param in model.lora_gate_net.parameters():
-            param.requires_grad = True
+    configure_peft_model(model, args, adapter_state=lora_state)
+    _log_trainable_parameters(model, get_peft_method(args))
 
     if args.data_parallel:
         model = torch.nn.DataParallel(model)
@@ -784,7 +836,10 @@ def load_model(checkpoint_file):
 
 
 def build_optim(args, params):
-    optimizer = torch.optim.AdamW(params, args.lr, weight_decay=args.weight_decay)
+    trainable_params = [parameter for parameter in params if parameter.requires_grad]
+    if not trainable_params:
+        raise ValueError("No trainable PEFT parameters were found when building the optimizer")
+    optimizer = torch.optim.AdamW(trainable_params, args.lr, weight_decay=args.weight_decay)
     return optimizer
 
 
@@ -825,9 +880,9 @@ def main(args):
         best_psnr = 0.
         start_epoch = 0
 
-    melora_dir = resolve_melora_dir(args)
-    melora_dir.mkdir(parents=True, exist_ok=True)
-    writer = SummaryWriter(log_dir=str(melora_dir / 'summary'))
+    peft_dir = resolve_peft_dir(args)
+    peft_dir.mkdir(parents=True, exist_ok=True)
+    writer = SummaryWriter(log_dir=str(peft_dir / 'summary'))
 
     logging.info(args)
     logging.info(model)
@@ -863,7 +918,7 @@ def main(args):
 
         is_new_best = dev_psnr > best_psnr
         best_psnr = max(best_psnr, dev_psnr)
-        save_model(args, melora_dir, epoch, model, optimizer, scheduler, best_psnr, is_new_best)
+        save_model(args, peft_dir, epoch, model, optimizer, scheduler, best_psnr, is_new_best)
         dev_metric_log = ' '.join(
             ' '.join(
                 f'{metric.upper()}[{acc}] = {value:.4g}'
@@ -878,7 +933,7 @@ def main(args):
             f'TrainTime = {train_time:.4f}s DevTime = {dev_time:.4f}s'
         )
         logging.info(summary_log)
-        save_epoch_validation_log(melora_dir, epoch, eval_log, summary_log)
+        save_epoch_validation_log(peft_dir, epoch, eval_log, summary_log)
     writer.close()
 
 def create_arg_parser():
@@ -917,7 +972,12 @@ def create_arg_parser():
     parser.add_argument('--usmask_path',type=str,help='us mask path')
     parser.add_argument('--mask_type',type=str,help='mask type - cartesian, gaussian')
 
-    # MELoRA settings
+    # PEFT method selection. MELoRA remains the default for existing commands.
+    parser.add_argument('--peft-method', type=str, choices=['melora', 'dora', 'lora-xs'], default='melora',
+                        help='Convolution PEFT method: melora (default), dora, or lora-xs')
+
+    # MELoRA settings. --melora-target is shared by all PEFT methods so every
+    # comparison uses precisely the same Conv2d target set.
     parser.add_argument('--melora_r', type=str, default='2,4,6,8',
                         help='comma-separated ranks per hierarchy level')
     parser.add_argument('--melora_alpha', type=str, default='16,16,16,16',
@@ -926,6 +986,16 @@ def create_arg_parser():
                         help='dropout rate for MELoRA paths')
     parser.add_argument('--melora_target', type=str, default='',
                         help='comma-separated name substrings to target (e.g. "down_sample_layers")')
+    parser.add_argument('--adapter-rank', type=int, default=8,
+                        help='DoRA rank for each targeted convolution')
+    parser.add_argument('--adapter-alpha', type=float, default=16.0,
+                        help='DoRA alpha scaling value')
+    parser.add_argument('--adapter-dropout', type=float, default=0.0,
+                        help='DoRA low-rank path dropout probability')
+    parser.add_argument('--lora-xs-rank', type=int, default=8,
+                        help='LoRA-XS SVD basis rank for each targeted convolution')
+    parser.add_argument('--lora-xs-alpha', type=float, default=1.0,
+                        help='LoRA-XS core update scaling value')
     parser.add_argument('--use-lora-gate-net', action='store_true',
                         help='Enable LoRA gate net conditioning; if unset, use standard ConvLoRA training')
     parser.add_argument('--use-lora-ab-gate', dest='use_lora_ab_gate', action='store_true', default=True,
