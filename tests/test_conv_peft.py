@@ -1,11 +1,11 @@
-"""Minimal CPU tests for the convolutional DoRA and LoRA-XS adapters."""
+"""Minimal CPU tests for the convolutional DoRA and PiSSA adapters."""
 import copy
 import unittest
 
 import torch
 import torch.nn as nn
 
-from MC_DDPM_SH.models.conv_peft import ConvDoRA, ConvLoRAXS, set_conv_peft_trainable
+from MC_DDPM_SH.models.conv_peft import ConvDoRA, ConvPiSSA, set_conv_peft_trainable
 
 
 class ConvPEFTTest(unittest.TestCase):
@@ -19,7 +19,7 @@ class ConvPEFTTest(unittest.TestCase):
         adapter = adapter_cls(base, **kwargs).eval()
         x = torch.randn(2, in_channels, 11, 13)
 
-        # Zero-initialized adapters must preserve pretrained inference exactly.
+        # Fresh adapters must preserve pretrained inference exactly.
         torch.testing.assert_close(adapter(x), base_reference(x), rtol=1e-5, atol=1e-6)
 
         set_conv_peft_trainable(adapter)
@@ -51,9 +51,9 @@ class ConvPEFTTest(unittest.TestCase):
         self._exercise_adapter(ConvDoRA, {'rank': 2, 'alpha': 4.0}, 3, 5, 3)
         self._exercise_adapter(ConvDoRA, {'rank': 1, 'alpha': 2.0}, 1, 1, 1)
 
-    def test_lora_xs_for_3x3_and_1x1_convolutions(self):
-        self._exercise_adapter(ConvLoRAXS, {'rank': 2, 'alpha': 1.0}, 3, 5, 3)
-        self._exercise_adapter(ConvLoRAXS, {'rank': 4, 'alpha': 1.0}, 1, 1, 1)
+    def test_pissa_for_3x3_and_1x1_convolutions(self):
+        self._exercise_adapter(ConvPiSSA, {'rank': 2, 'alpha': 2.0}, 3, 5, 3)
+        self._exercise_adapter(ConvPiSSA, {'rank': 4, 'alpha': 1.0}, 1, 1, 1)
 
 
 if __name__ == '__main__':

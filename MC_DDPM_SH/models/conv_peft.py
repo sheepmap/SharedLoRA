@@ -9,7 +9,6 @@ from typing import Iterable, List, Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class ConvDoRA(nn.Module):
@@ -98,69 +97,94 @@ class ConvDoRA(nn.Module):
             self.conv.bias.mul_(self.dora_magnitude / direction_norm)
 
 
-class ConvLoRAXS(nn.Module):
-    """LoRA-XS adapter for a regular 2-D convolution.
+class ConvPiSSA(nn.Module):
+    """PiSSA adapter for a regular 2-D convolution.
 
-    SVD-derived bases are frozen buffers.  Only the small ``r x r``
-    ``lora_xs_core`` matrix is trainable, and it is zero initialized so the
-    wrapped layer initially matches the pretrained convolution exactly.
+    PiSSA decomposes the pretrained kernel into a frozen residual and its
+    leading SVD components.  The leading components initialize the trainable
+    LoRA-style ``lora_A``/``lora_B`` branch, so the residual branch plus the
+    adapter exactly reconstruct the pretrained convolution at step zero.
     """
 
     def __init__(self, conv: nn.Conv2d, rank: int, alpha: float = 1.0):
         super().__init__()
         _require_regular_conv(conv)
         if rank <= 0:
-            raise ValueError(f"LoRA-XS rank must be positive, got {rank}")
+            raise ValueError(f"PiSSA rank must be positive, got {rank}")
+        if alpha <= 0:
+            raise ValueError(f"PiSSA alpha must be positive, got {alpha}")
 
         self.conv = conv
-        _freeze_module(self.conv)
         out_channels = conv.out_channels
         flat_weight = conv.weight.detach().float().reshape(out_channels, -1)
         u, singular_values, vh = torch.linalg.svd(flat_weight, full_matrices=False)
         self.rank = min(int(rank), u.shape[1])
         if self.rank < 1:
-            raise ValueError(f"Unable to construct LoRA-XS basis for {tuple(conv.weight.shape)}")
+            raise ValueError(f"Unable to construct PiSSA factors for {tuple(conv.weight.shape)}")
 
-        # Use the symmetric SVD factorization U sqrt(S) and sqrt(S) V^T.
-        # It keeps the core update well-conditioned while preserving the
-        # pretrained weight's principal low-rank subspace.
-        sqrt_singular_values = singular_values[:self.rank].sqrt()
-        left_basis = u[:, :self.rank] * sqrt_singular_values.unsqueeze(0)
-        right_basis = sqrt_singular_values.unsqueeze(1) * vh[:self.rank, :]
-        self.register_buffer("lora_xs_left_basis", left_basis.to(dtype=conv.weight.dtype))
-        self.register_buffer("lora_xs_right_basis", right_basis.to(dtype=conv.weight.dtype))
-        self.lora_xs_core = nn.Parameter(
-            torch.zeros(self.rank, self.rank, device=conv.weight.device, dtype=conv.weight.dtype)
-        )
         self.scaling = float(alpha) / self.rank
+        # Match PiSSA's symmetric SVD initialization.  Dividing both factors
+        # by sqrt(scaling) keeps scaling * (B @ A) equal to the removed
+        # principal component for any positive alpha.
+        factor_scale = math.sqrt(self.scaling)
+        sqrt_singular_values = singular_values[:self.rank].sqrt() / factor_scale
+        lora_b = u[:, :self.rank] * sqrt_singular_values.unsqueeze(0)
+        lora_a = sqrt_singular_values.unsqueeze(1) * vh[:self.rank, :]
+        lora_a = lora_a.reshape(self.rank, conv.in_channels, *conv.kernel_size)
 
-    def _delta_weight(self) -> torch.Tensor:
-        delta = self.lora_xs_left_basis @ self.lora_xs_core @ self.lora_xs_right_basis
-        return delta.reshape_as(self.conv.weight) * self.scaling
+        self.lora_A = nn.Conv2d(
+            conv.in_channels,
+            self.rank,
+            conv.kernel_size,
+            conv.stride,
+            conv.padding,
+            conv.dilation,
+            groups=1,
+            bias=False,
+            device=conv.weight.device,
+            dtype=conv.weight.dtype,
+        )
+        self.lora_B = nn.Conv2d(
+            self.rank,
+            conv.out_channels,
+            kernel_size=1,
+            bias=False,
+            device=conv.weight.device,
+            dtype=conv.weight.dtype,
+        )
+        with torch.no_grad():
+            self.lora_A.weight.copy_(lora_a.to(dtype=conv.weight.dtype))
+            self.lora_B.weight.copy_(lora_b.to(dtype=conv.weight.dtype).unsqueeze(-1).unsqueeze(-1))
+            # The frozen convolution stores only the non-principal residual.
+            conv.weight.sub_(self._adapter_weight())
+        _freeze_module(self.conv)
+        self.merged = False
+
+    def _adapter_weight(self) -> torch.Tensor:
+        return torch.einsum(
+            "or,rihw->oihw",
+            self.lora_B.weight.squeeze(-1).squeeze(-1),
+            self.lora_A.weight,
+        ) * self.scaling
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         base = self.conv(x)
-        delta = F.conv2d(
-            x,
-            self._delta_weight(),
-            None,
-            self.conv.stride,
-            self.conv.padding,
-            self.conv.dilation,
-            self.conv.groups,
-        )
-        return base + delta
+        if self.merged:
+            return base
+        return base + self.lora_B(self.lora_A(x)) * self.scaling
 
     @torch.no_grad()
     def merge(self) -> None:
-        """Materialize the current LoRA-XS update in the frozen base convolution."""
-        self.conv.weight.add_(self._delta_weight())
+        """Materialize the current PiSSA adapter in the residual convolution."""
+        if not self.merged:
+            self.conv.weight.add_(self._adapter_weight())
+            self.merged = True
 
 
 def _require_regular_conv(conv: nn.Conv2d) -> None:
     if conv.groups != 1:
         raise ValueError(
-            "ConvDoRA and ConvLoRAXS currently support only groups=1 convolutions, "
+            "ConvDoRA and ConvPiSSA currently support only groups=1 convolutions, "
             f"got groups={conv.groups} for {conv!r}"
         )
 
@@ -233,7 +257,7 @@ def apply_dora_to_model(
     )
 
 
-def apply_lora_xs_to_model(
+def apply_pissa_to_model(
     model: nn.Module,
     rank: int,
     alpha: float = 1.0,
@@ -243,7 +267,7 @@ def apply_lora_xs_to_model(
 ) -> nn.Module:
     return _replace_conv_modules(
         model,
-        ConvLoRAXS,
+        ConvPiSSA,
         {"rank": rank, "alpha": alpha},
         target_module_names,
         exclude_module_names,
@@ -268,15 +292,15 @@ def apply_conv_peft(
         return apply_dora_to_model(
             model, rank, alpha, dropout, target_module_names, exclude_module_names, verbose
         )
-    if method == "lora-xs":
-        return apply_lora_xs_to_model(
+    if method == "pissa":
+        return apply_pissa_to_model(
             model, rank, alpha, target_module_names, exclude_module_names, verbose
         )
-    raise ValueError(f"Unsupported Conv PEFT method {method!r}; expected 'dora' or 'lora-xs'")
+    raise ValueError(f"Unsupported Conv PEFT method {method!r}; expected 'dora' or 'pissa'")
 
 
 def set_conv_peft_trainable(model: nn.Module) -> int:
-    """Freeze a model and enable only DoRA or LoRA-XS trainable parameters."""
+    """Freeze a model and enable only DoRA or PiSSA trainable parameters."""
     trainable_count = 0
     for name, parameter in model.named_parameters():
         is_adapter = "lora_" in name or "dora_" in name
@@ -287,5 +311,5 @@ def set_conv_peft_trainable(model: nn.Module) -> int:
 
 
 def get_conv_peft_layers(model: nn.Module) -> Iterable[nn.Module]:
-    """Yield the ConvDoRA and ConvLoRAXS wrappers in traversal order."""
-    return (module for module in model.modules() if isinstance(module, (ConvDoRA, ConvLoRAXS)))
+    """Yield the ConvDoRA and ConvPiSSA wrappers in traversal order."""
+    return (module for module in model.modules() if isinstance(module, (ConvDoRA, ConvPiSSA)))

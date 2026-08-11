@@ -598,8 +598,8 @@ def _make_peft_dirname(args):
         return f'r{r_str}_{target_str}_gate_{gate_mode}'
     if method == 'dora':
         return f'r{args.adapter_rank}_{target_str}_alpha_{args.adapter_alpha:g}'
-    if method == 'lora-xs':
-        return f'r{args.lora_xs_rank}_{target_str}_alpha_{args.lora_xs_alpha:g}'
+    if method == 'pissa':
+        return f'r{args.pissa_rank}_{target_str}_alpha_{args.pissa_alpha:g}'
     raise ValueError(f"Unsupported PEFT method: {method}")
 
 
@@ -749,15 +749,15 @@ def configure_peft_model(model, args, adapter_state=None):
     if use_lora_gate_net(args):
         raise ValueError(
             f"--use-lora-gate-net is currently supported only for MELoRA, not {method}. "
-            "Disable it for fair DoRA/LoRA-XS comparisons."
+            "Disable it for fair DoRA/PiSSA comparisons."
         )
     if method == 'dora':
         rank = getattr(args, 'adapter_rank', 8)
         alpha = getattr(args, 'adapter_alpha', 16.0)
         dropout = getattr(args, 'adapter_dropout', 0.0)
-    elif method == 'lora-xs':
-        rank = getattr(args, 'lora_xs_rank', 8)
-        alpha = getattr(args, 'lora_xs_alpha', 1.0)
+    elif method == 'pissa':
+        rank = getattr(args, 'pissa_rank', 8)
+        alpha = getattr(args, 'pissa_alpha', float(rank))
         dropout = 0.0
     else:
         raise ValueError(f"Unsupported PEFT method: {method}")
@@ -973,8 +973,8 @@ def create_arg_parser():
     parser.add_argument('--mask_type',type=str,help='mask type - cartesian, gaussian')
 
     # PEFT method selection. MELoRA remains the default for existing commands.
-    parser.add_argument('--peft-method', type=str, choices=['melora', 'dora', 'lora-xs'], default='melora',
-                        help='Convolution PEFT method: melora (default), dora, or lora-xs')
+    parser.add_argument('--peft-method', type=str, choices=['melora', 'dora', 'pissa'], default='melora',
+                        help='Convolution PEFT method: melora (default), dora, or pissa')
 
     # MELoRA settings. --melora-target is shared by all PEFT methods so every
     # comparison uses precisely the same Conv2d target set.
@@ -992,10 +992,10 @@ def create_arg_parser():
                         help='DoRA alpha scaling value')
     parser.add_argument('--adapter-dropout', type=float, default=0.0,
                         help='DoRA low-rank path dropout probability')
-    parser.add_argument('--lora-xs-rank', type=int, default=8,
-                        help='LoRA-XS SVD basis rank for each targeted convolution')
-    parser.add_argument('--lora-xs-alpha', type=float, default=1.0,
-                        help='LoRA-XS core update scaling value')
+    parser.add_argument('--pissa-rank', type=int, default=8,
+                        help='PiSSA SVD rank for each targeted convolution')
+    parser.add_argument('--pissa-alpha', type=float, default=8.0,
+                        help='PiSSA adapter scaling value (rank is the standard setting)')
     parser.add_argument('--use-lora-gate-net', action='store_true',
                         help='Enable LoRA gate net conditioning; if unset, use standard ConvLoRA training')
     parser.add_argument('--use-lora-ab-gate', dest='use_lora_ab_gate', action='store_true', default=True,

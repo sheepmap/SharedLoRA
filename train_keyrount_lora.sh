@@ -39,9 +39,10 @@ DORA_RANK=8
 DORA_ALPHA=16
 DORA_DROPOUT=0.0
 
-# LoRA-XS rank scan: 4, 8, 16. Used only when PEFT_METHOD="lora-xs".
-LORA_XS_RANK=8
-LORA_XS_ALPHA=1.0
+# PiSSA rank scan: 4, 8, 16. Used only when PEFT_METHOD="pissa".
+PISSA_RANK=8
+# PiSSA conventionally uses alpha = rank.
+PISSA_ALPHA=${PISSA_RANK}
 
 LORA_GATE_NET_ARG=""
 if [ "${USE_LORA_GATE_NET}" = "1" ]; then
@@ -63,11 +64,11 @@ case "${PEFT_METHOD}" in
     dora)
         PEFT_EXTRA_ARGS="--adapter-rank ${DORA_RANK} --adapter-alpha ${DORA_ALPHA} --adapter-dropout ${DORA_DROPOUT}"
         ;;
-    lora-xs)
-        PEFT_EXTRA_ARGS="--lora-xs-rank ${LORA_XS_RANK} --lora-xs-alpha ${LORA_XS_ALPHA}"
+    pissa)
+        PEFT_EXTRA_ARGS="--pissa-rank ${PISSA_RANK} --pissa-alpha ${PISSA_ALPHA}"
         ;;
     *)
-        echo "Unsupported PEFT_METHOD: ${PEFT_METHOD}. Choose melora, dora, or lora-xs." >&2
+        echo "Unsupported PEFT_METHOD: ${PEFT_METHOD}. Choose melora, dora, or pissa." >&2
         exit 1
         ;;
 esac

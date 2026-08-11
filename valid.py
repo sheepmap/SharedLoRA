@@ -151,15 +151,15 @@ def load_model(checkpoint_file, use_lora=False, lora_path=None):
                                   lora_dropout=getattr(lora_args, 'melora_dropout', 0.0),
                                   target_module_names=target,
                                   verbose=True)
-        elif peft_method in ('dora', 'lora-xs'):
+        elif peft_method in ('dora', 'pissa'):
             from MC_DDPM_SH.models.conv_peft import apply_conv_peft
             if peft_method == 'dora':
                 rank = getattr(lora_args, 'adapter_rank', 8)
                 alpha = getattr(lora_args, 'adapter_alpha', 16.0)
                 dropout = getattr(lora_args, 'adapter_dropout', 0.0)
             else:
-                rank = getattr(lora_args, 'lora_xs_rank', 8)
-                alpha = getattr(lora_args, 'lora_xs_alpha', 1.0)
+                rank = getattr(lora_args, 'pissa_rank', 8)
+                alpha = getattr(lora_args, 'pissa_alpha', float(rank))
                 dropout = 0.0
             apply_conv_peft(
                 model, peft_method, rank=rank, alpha=alpha, dropout=dropout,
@@ -212,7 +212,7 @@ def load_model(checkpoint_file, use_lora=False, lora_path=None):
             else:
                 print(f"MELoRA adapter loaded from {lora_path} for dynamic inference")
         else:
-            # DoRA and LoRA-XS are kept as dynamic wrappers. Their adapters
+            # DoRA and PiSSA are kept as dynamic wrappers. Their adapters
             # remain active in forward rather than being merged and applied a
             # second time by their wrapper modules.
             print(f"{peft_method} adapter loaded from {lora_path} for dynamic inference")
@@ -311,7 +311,7 @@ def create_arg_parser():
     parser.add_argument('--usmask_path',type=str,help='undersampling mask path')
     parser.add_argument('--mask_type',type=str,help='mask type - cartesian, gaussian')
     parser.add_argument('--use_lora', '--use-adapter', dest='use_lora', action='store_true', default=False,
-                        help='Load a MELoRA, DoRA, or LoRA-XS adapter for inference')
+                        help='Load a MELoRA, DoRA, or PiSSA adapter for inference')
     parser.add_argument('--lora_path', '--adapter-path', dest='lora_path', type=pathlib.Path, default=None,
                         help='Path to adapter.pt or adapter_best.pt (required with --use_lora)')
 
