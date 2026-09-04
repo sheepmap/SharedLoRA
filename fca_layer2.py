@@ -17,7 +17,6 @@ class DCT_2D(nn.Module):
         arr = torch.cat((ip,torch.flip(ip,[-1])),dim=-1)
 
         fft_out = torch.fft.fft(arr,norm='forward')
-        #print(fft_out.shape, torch.min(torch.abs(fft_out)), torch.max(torch.abs(fft_out)))
         req_fft = fft_out[:,:,:,:length]
         req_sign = torch.sign(req_fft.real)
 

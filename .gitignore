@@ -1,0 +1,19 @@
+# Python bytecode caches
+__pycache__/
+*.py[cod]
+
+# Datasets, masks, checkpoints and experiment outputs (never commit data)
+datasets/
+datasets_test/
+usmasks/
+experiments/
+*.h5
+*.npy
+*.pt
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store
+Thumbs.db

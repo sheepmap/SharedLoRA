@@ -269,14 +269,12 @@ def create_data_loaders(args):
         dataset=train_data,
         batch_size=args.batch_size,
         shuffle=True,
-        # num_workers=0 (原始, 单进程加载)
         num_workers=4,
         pin_memory=True
     )
     dev_loader = DataLoader(
         dataset=dev_data,
         batch_size=args.batch_size,
-        # num_workers=0 (原始, 单进程加载)
         num_workers=4,
         pin_memory=True
     )
@@ -284,7 +282,6 @@ def create_data_loaders(args):
         dataset=display1,
         batch_size=16,
         shuffle=True,
-        # num_workers=0 (原始, 单进程加载)
         num_workers=4,
         pin_memory=True
     )
@@ -786,12 +783,12 @@ def _log_trainable_parameters(model, method):
     logger.info(f"  Trainable params: {trainable_count:,} ({trainable_count/total_count*100:.1f}%)")
     logger.info(f"  Trainable layers ({len(trainable_names)}):")
     for n in trainable_names[:10]:
-        logger.info(f"    鉁?{n}")
+        logger.info(f"    - {n}")
     if len(trainable_names) > 10:
         logger.info(f"    ... and {len(trainable_names) - 10} more")
     logger.info(f"  Frozen layer sample:")
     for n in frozen_sample:
-        logger.info(f"    鉁?{n}")
+        logger.info(f"    - {n}")
     logger.info(f"{'='*60}")
 
 

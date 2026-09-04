@@ -101,7 +101,6 @@ def save_reconstructions(reconstructions, out_dir):
 
 def create_data_loaders(args):
 
-    #data = SliceDataDev(args.data_path,args.acceleration_factor,args.dataset_type,args.usmask_path)
     data = SliceDataDev(args.data_path,args.acceleration_factor,args.dataset_type,args.mask_type,args.usmask_path)
     data_loader = DataLoader(
         dataset=data,

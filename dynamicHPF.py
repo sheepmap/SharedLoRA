@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 import numpy as np
-import cv2
 
 # returns the padding type
 def get_pad_layer(pad_type):
@@ -45,14 +44,7 @@ class DynamicHPF(nn.Module):
 
         n,c,h,w = sigma.shape #b,18.H,W
 
-#         sum_axis = 1
-#         print(f'sigma shape = {sigma.shape}')#' sum in axis {sum_axis} = {torch.sum(sigma,axis=sum_axis)}')
-
         sigma = sigma.reshape(n,1,c,h*w) #b,1,18,H*W
-
-        # sum_axis = 2
-        # print(f'after reshape \n sigma shape = {sigma.shape}' sum in axis {sum_axis} = {torch.sum(sigma,axis=sum_axis)}')
-
 
         n,c,h,w = x.shape #b,32,H,W # making x look like kernels
         x = F.unfold(self.pad(x), kernel_size=self.kernel_size).reshape((n,c,self.kernel_size*self.kernel_size,h*w))
@@ -64,9 +56,5 @@ class DynamicHPF(nn.Module):
 
         sigma = sigma.permute(2,0,1,3).reshape((p//(self.kernel_size*self.kernel_size), self.kernel_size*self.kernel_size,n,c2,q)).permute(2,0,3,1,4)
 
-#         print(f'sigma shape = {sigma.shape} x shape = {x.shape}')#sigma sum = {torch.sum(sigma,axis=[1,3])}')
-       
-#         print(f'x*sigma shape = {(x*sigma).shape} \n torch.sum(x*sigma, dim=3) shape = {torch.sum(x*sigma, dim=3).shape}')
         x = torch.sum(x*sigma, dim=3).reshape(n,c1,h,w)
-#         print(f'x shape = {x.shape}')
         return x[:,:,torch.arange(h)%self.stride==0,:][:,:,:,torch.arange(w)%self.stride==0]

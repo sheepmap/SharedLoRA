@@ -6,7 +6,6 @@ from argparse import ArgumentParser
 import h5py
 import numpy as np
 from runstats import Statistics
-#from skimage.measure import compare_psnr, compare_ssim
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 from skimage.filters import laplace
 from tqdm import tqdm
@@ -49,9 +48,6 @@ def psnr(gt, pred):
 
 def ssim(gt, pred):
     """ Compute Structural Similarity Index Metric (SSIM). """
-    #return compare_ssim(
-    #    gt.transpose(1, 2, 0), pred.transpose(1, 2, 0), multichannel=True, data_range=gt.max()
-    #)
     return structural_similarity(gt,pred,multichannel=True, data_range=gt.max())
 
 METRIC_FUNCS = dict(
@@ -155,17 +151,6 @@ class Metrics:
             metric: stat.stddev() for metric, stat in self.metrics.items()
         }
 
-
-    '''
-    def __repr__(self):
-        means = self.means()
-        stddevs = self.stddevs()
-        metric_names = sorted(list(means))
-        return ' '.join(
-            f'{name} = {means[name]:.4g} +/- {2 * stddevs[name]:.4g}' for name in metric_names
-        )
-    '''
-
     def get_report(self):
         means = self.means()
         stddevs = self.stddevs()
@@ -180,7 +165,6 @@ def evaluate(args, recons_key):
     for tgt_file in args.target_path.iterdir():
         if tgt_file.suffix != '.h5':
             continue
-        #print (tgt_file)
         with h5py.File(tgt_file) as target, h5py.File(
           args.predictions_path / tgt_file.name) as recons:
             target = target[recons_key]
@@ -225,5 +209,3 @@ if __name__ == '__main__':
             f.write(metrics_report)
     else:
         write_aggregated_report(report_file, args.acc_factor, metrics_report)
-
-    #print(metrics)

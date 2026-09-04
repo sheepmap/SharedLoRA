@@ -26,29 +26,24 @@ logger = logging.getLogger(__name__)
 
 def create_datasets(args):
 
-    
+
     acc_factors = args.acceleration_factor.split(',')
     mask_types = args.mask_type.split(',')
     dataset_types = args.dataset_type.split(',')
-    
+
     train_data = SliceData(args.train_path,acc_factors, dataset_types,mask_types,'train', args.usmask_path)
     dev_data = SliceData(args.validation_path,acc_factors,dataset_types,mask_types,'validation', args.usmask_path)
-    # display1_data = SliceDisplayDataDev(args.validation_path,'mrbrain_t1','cartesian','4x', args.usmask_path)
-    #换成所用数据集
     display_dataset_type = dataset_types[0] if dataset_types else 'mrbrain_t1'
     display_mask_type = mask_types[0] if mask_types else 'cartesian'
     display_acc_factor = acc_factors[0] if acc_factors else '4x'
     display1_data = SliceDisplayDataDev(args.validation_path, display_dataset_type, display_mask_type, display_acc_factor, args.usmask_path)
-    
+
     return dev_data, train_data, display1_data
 
 def create_data_loaders(args):
     dev_data, train_data, display1_data = create_datasets(args)
-    #print ("in create_data_loader",len(display1_data),len(display2_data)) 
 
     display1 = [display1_data[i] for i in range(0, len(display1_data), len(display1_data) // 16)]
-
-    #print (display1,display2)
 
     train_loader = DataLoader(
         dataset=train_data,
@@ -103,12 +98,11 @@ def gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, m
 
 
 def train_epoch(args, epoch, model,data_loader, optimizer, writer, mask_bank, acc_factors, mask_types, dataset_types):
-    
+
     model.train()
     avg_loss = 0.
     start_epoch = start_iter = time.perf_counter()
     global_step = epoch * len(data_loader)
-    #print ("Entering Train epoch")
 
     for iter, data in enumerate(tqdm(data_loader)):
 
@@ -138,8 +132,6 @@ def train_epoch(args, epoch, model,data_loader, optimizer, writer, mask_bank, ac
             )
         start_iter = time.perf_counter()
 
-        #break
-
     return avg_loss, time.perf_counter() - start_epoch
 
 
@@ -167,7 +159,7 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
             loss = F.mse_loss(output,target)
             losses.append(loss.item())
 
-            # 逐 slice 计算 PSNR/SSIM
+            # Compute PSNR/SSIM per slice
             output_np = output.detach().cpu().numpy().squeeze(1)  # [B, H, W]
             target_np = target.detach().cpu().numpy().squeeze(1)
             for b in range(output_np.shape[0]):
@@ -244,8 +236,8 @@ def save_model(args, exp_dir, epoch, model, optimizer, scheduler, best_psnr, is_
 
 
 def build_model(args):
-    
-    model = DnCn(args,n_channels=1).to(args.device) 
+
+    model = DnCn(args,n_channels=1).to(args.device)
     return model
 
 def load_model(checkpoint_file):
@@ -261,7 +253,7 @@ def load_model(checkpoint_file):
     optimizer = build_optim(args, model.parameters())
     optimizer.load_state_dict(checkpoint['optimizer'])
 
-    return checkpoint, model, optimizer 
+    return checkpoint, model, optimizer
 
 
 def build_optim(args, params):
@@ -271,7 +263,6 @@ def build_optim(args, params):
 
 def main(args):
     args.exp_dir.mkdir(parents=True, exist_ok=True)
-    #writer = SummaryWriter(logdir=str(args.exp_dir / 'summary'))
     writer = SummaryWriter(log_dir=str(args.exp_dir / 'summary'))
 
     if args.resume:
@@ -280,29 +271,25 @@ def main(args):
         args = checkpoint['args']
         best_psnr = checkpoint.get('best_psnr', 0.)
         start_epoch = checkpoint['epoch'] + 1
-        # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_step_size, args.lr_gamma)
-        # 注释原因：StepLR 在短训练（如10 epoch）中衰减次数过少（lr_step_size=40 时整个训练期间学习率不变），
-        # 改为 CosineAnnealingLR 使学习率在整个训练周期内平滑下降，更适合短周期训练。
+        # CosineAnnealingLR instead of StepLR: with lr_step_size=40 the LR would not
+        # decay even once in short runs (e.g. 10 epochs); cosine decays smoothly.
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=args.lr_eta_min)
         if 'scheduler' in checkpoint:
             scheduler.load_state_dict(checkpoint['scheduler'])
         else:
-            # 旧 checkpoint 没有 scheduler 状态，手动追赶进度
-            # 用命令行传入的 lr 覆盖 checkpoint 中的 lr
+            # Old checkpoints carry no scheduler state: fast-forward it and
+            # override the LR with the command-line value.
             for _ in range(start_epoch):
                 scheduler.step()
             optimizer.param_groups[0]['lr'] = args.lr
         del checkpoint
     else:
         model = build_model(args)
-        #print ("Model Built")
         if args.data_parallel:
             model = torch.nn.DataParallel(model)
         optimizer = build_optim(args, model.parameters())
-        #print ("Optmizer initialized")
-        # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_step_size, args.lr_gamma)
-        # 注释原因：StepLR 在短训练（如10 epoch）中衰减次数过少（lr_step_size=40 时整个训练期间学习率不变），
-        # 改为 CosineAnnealingLR 使学习率在整个训练周期内平滑下降，更适合短周期训练。
+        # CosineAnnealingLR instead of StepLR: with lr_step_size=40 the LR would not
+        # decay even once in short runs (e.g. 10 epochs); cosine decays smoothly.
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=args.lr_eta_min)
         best_psnr = 0.
         start_epoch = 0
@@ -353,7 +340,7 @@ def create_arg_parser():
     parser.add_argument('--weight-decay', type=float, default=0.,
                         help='Strength of weight decay regularization')
     parser.add_argument('--report-interval', type=int, default=100, help='Period of loss reporting')
-    parser.add_argument('--data-parallel', action='store_true', 
+    parser.add_argument('--data-parallel', action='store_true',
                         help='If set, use multiple GPUs using data parallelism')
     parser.add_argument('--device', type=str, default='cuda',
                         help='Which device to train on. Set to "cuda" to use the GPU')
@@ -371,7 +358,7 @@ def create_arg_parser():
     parser.add_argument('--dataset_type',type=str,help='cardiac,kirby')
     parser.add_argument('--usmask_path',type=str,help='us mask path')
     parser.add_argument('--mask_type',type=str,help='mask type - cartesian, gaussian')
-    
+
     return parser
 
 

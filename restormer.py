@@ -26,40 +26,6 @@ class OverlapPatchEmbed(nn.Module):
         return x
 
 
-# class Attention(nn.Module):
-#     def __init__(self, dim, num_heads, bias):
-#         super(Attention, self).__init__()
-#         self.num_heads = num_heads
-#         self.temperature = nn.Parameter(torch.ones(num_heads, 1, 1))
-
-#         self.qkv = nn.Conv2d(dim, dim*3, kernel_size=1, bias=bias)
-#         self.qkv_dwconv = nn.Conv2d(dim*3, dim*3, kernel_size=3, stride=1, padding=1, groups=dim*3, bias=bias)
-#         self.project_out = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
-        
-
-
-#     def forward(self, x):
-#         b,c,h,w = x.shape
-
-#         qkv = self.qkv_dwconv(self.qkv(x))
-#         q,k,v = qkv.chunk(3, dim=1)   
-        
-#         q = rearrange(q, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
-#         k = rearrange(k, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
-#         v = rearrange(v, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
-
-#         q = torch.nn.functional.normalize(q, dim=-1)
-#         k = torch.nn.functional.normalize(k, dim=-1)
-
-#         attn = (q @ k.transpose(-2, -1)) * self.temperature
-#         attn = attn.softmax(dim=-1)
-
-#         out = (attn @ v)
-        
-#         out = rearrange(out, 'b head c (h w) -> b (head c) h w', head=self.num_heads, h=h, w=w)
-
-#         out = self.project_out(out)
-#         return out
 
 class Attention(nn.Module):
     def __init__(self, dim, num_heads, bias):
@@ -84,11 +50,9 @@ class Attention(nn.Module):
         kv = self.kv_dwconv(self.kv(x))
         k,v = kv.chunk(2, dim=1)   
         
-        # q = rearrange(q, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
         k = rearrange(k, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
         v = rearrange(v, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
 
-        # q = torch.nn.functional.normalize(q, dim=-1)
         q = torch.nn.functional.interpolate(task_q,size=(k.shape[2],k.shape[3]))
         k = torch.nn.functional.normalize(k, dim=-1)
 
@@ -201,10 +165,6 @@ class UNetConvBlock(nn.Module):
 
         if downsample and use_csff:
 
-            # self.csff_enc = nn.Conv2d(out_size, out_size, 3, 1, 1)
-            # self.csff_dec = nn.Conv2d(in_size, out_size, 3, 1, 1)
-            # self.phi = nn.Conv2d(out_size, out_size, 3, 1, 1)
-            # self.gamma = nn.Conv2d(out_size, out_size, 3, 1, 1)
             self.enc_trans = Restormer(in_chans=out_size,out_chans=out_size,heads=16)
             self.dec_trans = Restormer(in_chans=out_size,out_chans=out_size,heads=16)
 
@@ -227,8 +187,6 @@ class UNetConvBlock(nn.Module):
         out += self.identity(x)
         if enc is not None and dec is not None:
             assert self.use_csff
-            # skip_ = F.leaky_relu(self.csff_enc(enc) + self.csff_dec(dec), 0.1, inplace=True)
-            # out = out*F.sigmoid(self.phi(skip_)) + self.gamma(skip_) + out
             phi = F.leaky_relu(self.enc_trans(enc), 0.1, inplace=True)
             gamma = F.leaky_relu(self.dec_trans(dec), 0.1, inplace=True)
             out = out*F.sigmoid(phi) + gamma + out
@@ -256,25 +214,6 @@ class Restormer(nn.Module):
 
 
 if __name__ == '__main__':
-    # dim = 48
-    # in_chans = 16
-    # heads = 1
-    # num_blocks = 4
-    # ffn_expansion_factor = 2.66
-    # bias = False
-    # LayerNorm_type = 'WithBias'   ## Other option 'BiasFree'
-    # B = 4 # Batches
-
-    # pe = OverlapPatchEmbed(in_chans,dim)
-    # trans = nn.Sequential(*[TransformerBlock(dim=dim, num_heads=heads, ffn_expansion_factor=ffn_expansion_factor, bias=bias, LayerNorm_type=LayerNorm_type) for _ in range(num_blocks)])
-
-
-    # feat = torch.rand((B,in_chans,256,256))
-
-    # patches = pe(feat)
-    # out = trans(patches)
-
-    # print(f'input shape = {feat.shape} out shape = {out.shape}')
 
     in_chans = 16
     out_chans = 32

@@ -19,7 +19,6 @@ def npComplexToTorch(kspace_np):
 def normal_pdf(length, sensitivity):
     return np.exp(-sensitivity * (np.arange(length) - length / 2)**2)
 
-#def cartesian_mask(shape, acc, sample_n=10, centred=False):
 def cartesian_mask(shape, acc):
     sample_n=10
     centred=False
@@ -83,7 +82,6 @@ def gaussian2d(pattern_shape, factor, center=None, cov=None):
     if cov is None:
         cov = np.array([[(1.0 * pattern_shape[0] / 5.5) ** 2, 0], \
                         [0, (1.0 * pattern_shape[1] / 5.5) ** 2]])
-#         print(cov)
 
     samples = np.array([0])
 
@@ -99,8 +97,6 @@ def gaussian2d(pattern_shape, factor, center=None, cov=None):
         indexesy = np.logical_and(samples[:, 1] >= 0, samples[:, 1] < pattern_shape[1])
         indexes = np.logical_and(indexesx, indexesy)
         samples = samples[indexes]
-        # samples[:,0] = np.clip(samples[:,0],0,input_shape[0]-1)
-        # samples[:,1] = np.clip(samples[:,1],0,input_shape[1]-1)
         samples = np.unique(samples[:, 0] + 1j * samples[:, 1])
         samples = np.column_stack((samples.real, samples.imag)).astype(int)
         if samples.shape[0] < factor:
@@ -151,11 +147,7 @@ def centered_circle(image_shape,radius):
     return circle_image        
                                                                                   
 def gaussian_mask(size,acc):
-    us_mask1_1 = gaussian_pattern((size[0],size[1]),(1/acc),"2D")
-    #true gaussian mask
-    # us_mask1_2 = centered_circle((size[0],size[1]),5)
-    # us_mask1_3 = np.logical_or(us_mask1_1,us_mask1_2)
-    #return np.fft.fftshift(us_mask1_3).astype(float)     
+    us_mask1_1 = gaussian_pattern((size[0],size[1]),(1/acc),"2D")     
     return np.fft.fftshift(us_mask1_1).astype(float)     
 
 def CreateZeroFilledImage(fsimage, us_factor):

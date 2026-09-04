@@ -4,8 +4,7 @@ import numpy as np
 import h5py
 from torch.utils.data import Dataset
 import torch
-from skimage import feature
-import os 
+import os
 from utils import npComplexToTorch,CreateZeroFilledImageFn
 
 class SliceData(Dataset):
@@ -150,7 +149,6 @@ class SliceDisplayDataDev(Dataset):
 
         for fname in sorted(files):
             with h5py.File(fname,'r') as hf:
-                #print(hf.keys())
                 fsvol = hf['volfs']
                 num_slices = fsvol.shape[2]
                 self.examples += [(fname, slice) for slice in range(num_slices)]
