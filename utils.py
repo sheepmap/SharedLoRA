@@ -1,4 +1,3 @@
-import torch
 import numpy as np
 
 from numpy.fft import fft, fft2, ifft2, ifft, ifftshift, fftshift
@@ -8,7 +7,9 @@ from numpy.lib.stride_tricks import as_strided
 
 def npComplexToTorch(kspace_np):
 
-    # Converts a numpy complex to torch 
+    import torch
+
+    # Converts a numpy complex to torch
     kspace_real_torch=torch.from_numpy(kspace_np.real)
     kspace_imag_torch=torch.from_numpy(kspace_np.imag)
     kspace_torch = torch.stack([kspace_real_torch,kspace_imag_torch],dim=2)

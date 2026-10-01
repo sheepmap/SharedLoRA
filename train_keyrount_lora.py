@@ -71,7 +71,12 @@ def _inner_model(model):
 
 
 def parse_acceleration_factor(acc_factor):
-    match = re.search(r"[-+]?\d*\.?\d+", str(acc_factor))
+    text = str(acc_factor)
+    rate_match = re.fullmatch(r"rate(\d+(?:\.\d+)?)", text)
+    if rate_match:
+        # rate-mask naming: 'rate20' keeps 20% of k-space, so R = 100 / 20 = 5.
+        return 100.0 / float(rate_match.group(1))
+    match = re.search(r"[-+]?\d*\.?\d+", text)
     if match is None:
         raise ValueError(f"Unable to parse acceleration factor from {acc_factor!r}")
     return float(match.group(0))
@@ -289,13 +294,19 @@ def create_data_loaders(args):
     return train_loader, dev_loader, display_loader1
 
 
-def build_mask_bank(acc_factors, mask_types, dataset_types, usmask_path, device):
-    """Load pre-generated fixed masks from .npy files onto GPU."""
+def build_mask_bank(acc_factors, mask_types, dataset_types, usmask_path, device, mask_group=''):
+    """Load pre-generated fixed masks from .npy files onto GPU.
+
+    mask_group optionally selects a rate/seed subdirectory, e.g. 'seed42', giving
+    usmasks/<ds>/<mt>/<mask_group>/mask_<af>.npy; empty means the legacy flat layout.
+    """
     mask_bank = {}
     for ds in dataset_types:
         for mt in mask_types:
             for af in acc_factors:
-                path = os.path.join(usmask_path, ds, mt, f'mask_{af}.npy')
+                base = os.path.join(usmask_path, ds, mt, mask_group) if mask_group \
+                    else os.path.join(usmask_path, ds, mt)
+                path = os.path.join(base, f'mask_{af}.npy')
                 mask_bank[(ds, mt, af)] = torch.from_numpy(np.load(path)).to(device)
     return mask_bank
 
@@ -898,7 +909,8 @@ def main(args):
     acc_factors = args.acceleration_factor.split(',')
     mask_types = args.mask_type.split(',')
     dataset_types = args.dataset_type.split(',')
-    mask_bank = build_mask_bank(acc_factors, mask_types, dataset_types, args.usmask_path, args.device)
+    mask_bank = build_mask_bank(acc_factors, mask_types, dataset_types, args.usmask_path, args.device,
+                                mask_group=getattr(args, 'mask_group', '') or '')
 
     for epoch in range(start_epoch, args.num_epochs):
 
@@ -968,6 +980,9 @@ def create_arg_parser():
     parser.add_argument('--dataset_type',type=str,help='cardiac,kirby')
     parser.add_argument('--usmask_path',type=str,help='us mask path')
     parser.add_argument('--mask_type',type=str,help='mask type - cartesian, gaussian')
+    parser.add_argument('--mask_group', type=str, default='',
+                        help="optional mask subdirectory group, e.g. seed42 for rate masks "
+                             "(usmasks/<ds>/<mt>/<group>/mask_<af>.npy); empty = legacy flat layout")
 
     # PEFT method selection. MELoRA remains the default for existing commands.
     parser.add_argument('--peft-method', type=str, choices=['melora', 'dora', 'pissa'], default='melora',

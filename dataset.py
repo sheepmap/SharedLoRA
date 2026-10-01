@@ -89,12 +89,13 @@ class SliceDataDev(Dataset):
     A PyTorch Dataset that provides access to MR image slices.
     """
 
-    def __init__(self, root,acc_factor,dataset_type,mask_type,mask_path):
+    def __init__(self, root,acc_factor,dataset_type,mask_type,mask_path, mask_group=''):
 
         # List the h5 files in root
         files = [f for f in pathlib.Path(root).iterdir() if f.suffix == '.h5']
         self.examples = []
         self.mask_path = mask_path
+        self.mask_group = mask_group or ''
 
         for fname in sorted(files):
             with h5py.File(fname,'r') as hf:
@@ -114,14 +115,25 @@ class SliceDataDev(Dataset):
     
         with h5py.File(fname, 'r') as data:
 
-            key_img = 'img_volus_{}'.format(acc_factor)
-            key_kspace = 'kspace_volus_{}'.format(acc_factor)
-            input_img  = data[key_img][:,:,slice]
-            input_kspace  = data[key_kspace][:,:,slice]
-            input_kspace = npComplexToTorch(input_kspace)
             target = data['volfs'][:,:,slice]
 
-            mask = np.load(os.path.join(self.mask_path,dataset_type, mask_type,'mask_{}.npy'.format(acc_factor)))
+            if self.mask_group:
+                # Rate/seed masks have no precomputed undersampled data in the h5;
+                # synthesize from volfs exactly like the training-time synthesis.
+                mask = np.load(os.path.join(self.mask_path,dataset_type, mask_type,
+                                            self.mask_group,'mask_{}.npy'.format(acc_factor)))
+                kspace = np.fft.fft2(target, norm='ortho')
+                us_kspace = kspace * mask
+                input_img = np.abs(np.fft.ifft2(us_kspace, norm='ortho')).astype(np.float32)
+                input_kspace = npComplexToTorch(us_kspace.astype(np.complex64))
+            else:
+                # Legacy path: undersampled inputs precomputed by ixi_to_h5.py.
+                key_img = 'img_volus_{}'.format(acc_factor)
+                key_kspace = 'kspace_volus_{}'.format(acc_factor)
+                input_img  = data[key_img][:,:,slice]
+                input_kspace  = data[key_kspace][:,:,slice]
+                input_kspace = npComplexToTorch(input_kspace)
+                mask = np.load(os.path.join(self.mask_path,dataset_type, mask_type,'mask_{}.npy'.format(acc_factor)))
             return torch.from_numpy(input_img), input_kspace, torch.from_numpy(target), torch.from_numpy(mask), str(fname.name),slice
 
 class SliceDisplayDataDev(Dataset):

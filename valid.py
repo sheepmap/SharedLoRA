@@ -44,7 +44,12 @@ def _inner_model(model):
 
 
 def parse_acceleration_factor(acc_factor):
-    match = re.search(r"[-+]?\d*\.?\d+", str(acc_factor))
+    text = str(acc_factor)
+    rate_match = re.fullmatch(r"rate(\d+(?:\.\d+)?)", text)
+    if rate_match:
+        # rate-mask naming: 'rate20' keeps 20% of k-space, so R = 100 / 20 = 5.
+        return 100.0 / float(rate_match.group(1))
+    match = re.search(r"[-+]?\d*\.?\d+", text)
     if match is None:
         raise ValueError(f"Unable to parse acceleration factor from {acc_factor!r}")
     return float(match.group(0))
@@ -101,7 +106,8 @@ def save_reconstructions(reconstructions, out_dir):
 
 def create_data_loaders(args):
 
-    data = SliceDataDev(args.data_path,args.acceleration_factor,args.dataset_type,args.mask_type,args.usmask_path)
+    data = SliceDataDev(args.data_path,args.acceleration_factor,args.dataset_type,args.mask_type,args.usmask_path,
+                        mask_group=getattr(args, 'mask_group', '') or '')
     data_loader = DataLoader(
         dataset=data,
         batch_size=args.batch_size,
@@ -309,6 +315,9 @@ def create_arg_parser():
     parser.add_argument('--dataset_type',type=str,help='cardiac,kirby')
     parser.add_argument('--usmask_path',type=str,help='undersampling mask path')
     parser.add_argument('--mask_type',type=str,help='mask type - cartesian, gaussian')
+    parser.add_argument('--mask_group', type=str, default='',
+                        help="optional mask subdirectory group, e.g. seed42 for rate masks "
+                             "(usmasks/<ds>/<mt>/<group>/mask_<af>.npy); empty = legacy flat layout")
     parser.add_argument('--use_lora', '--use-adapter', dest='use_lora', action='store_true', default=False,
                         help='Load a MELoRA, DoRA, or PiSSA adapter for inference')
     parser.add_argument('--lora_path', '--adapter-path', dest='lora_path', type=pathlib.Path, default=None,
