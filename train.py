@@ -36,7 +36,11 @@ def create_datasets(args):
     display_dataset_type = dataset_types[0] if dataset_types else 'mrbrain_t1'
     display_mask_type = mask_types[0] if mask_types else 'cartesian'
     display_acc_factor = acc_factors[0] if acc_factors else '4x'
-    display1_data = SliceDisplayDataDev(args.validation_path, display_dataset_type, display_mask_type, display_acc_factor, args.usmask_path)
+    # Reuse the validation dataset for visualization: SliceDisplayDataDev reads
+    # precomputed img_volus_<af>/kspace_volus_<af> keys, which --volfs-only h5
+    # files do not contain. visualize() takes the mask_bank branch and
+    # synthesizes the undersampled inputs on the GPU instead.
+    display1_data = dev_data
 
     return dev_data, train_data, display1_data
 
@@ -307,7 +311,8 @@ def main(args):
 
         train_loss,train_time = train_epoch(args, epoch, model, train_loader,optimizer,writer, mask_bank, acc_factors, mask_types, dataset_types)
         dev_loss, dev_psnr, dev_ssim, dev_time = evaluate(args, epoch, model, dev_loader, writer, mask_bank, acc_factors, mask_types, dataset_types)
-        visualize(args, epoch, model, display1_loader, writer,'t1')
+        visualize(args, epoch, model, display1_loader, writer, 't1',
+                  mask_bank, acc_factors, mask_types, dataset_types)
         scheduler.step()
 
         is_new_best = dev_psnr > best_psnr
