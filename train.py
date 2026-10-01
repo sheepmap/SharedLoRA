@@ -245,7 +245,12 @@ def build_model(args):
     return model
 
 def load_model(checkpoint_file):
-    checkpoint = torch.load(checkpoint_file)
+    # PyTorch >= 2.6 defaults weights_only=True, which rejects checkpoints
+    # containing argparse.Namespace; our own checkpoints are trusted.
+    try:
+        checkpoint = torch.load(checkpoint_file, weights_only=False)
+    except TypeError:  # older PyTorch without the kwarg
+        checkpoint = torch.load(checkpoint_file)
     args = checkpoint['args']
     model = build_model(args)
 
