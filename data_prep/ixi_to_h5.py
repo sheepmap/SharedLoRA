@@ -14,6 +14,7 @@ def preprocess_ixi_to_h5(
     mask_base_path=None,
     dataset_type='ixi_pd',
     split='train',
+    mask_group='',
 ):
     """
     Convert one IXI NIfTI volume to the project's H5 format.
@@ -41,9 +42,8 @@ def preprocess_ixi_to_h5(
             raise ValueError('mask_base_path must be provided to load pre-generated masks.')
 
         acc_str = f'{acc_factor}x'
-        mask_path = os.path.join(
-            mask_base_path, 'usmasks', dataset_type, mask_type, f'mask_{acc_str}.npy'
-        )
+        mask_dir = os.path.join(mask_base_path, 'usmasks', dataset_type, mask_type, mask_group)
+        mask_path = os.path.join(mask_dir, f'mask_{acc_str}.npy')
         if not os.path.exists(mask_path):
             raise FileNotFoundError(
                 f'Mask file not found: {mask_path}. Please run make_usmasks.py first.'
@@ -97,6 +97,7 @@ def batch_preprocess(
     splits=('train', 'validation', 'test'),
     merge_eval_acc_factors=False,
     split_input_dirs=None,
+    mask_group='',
 ):
     """
     Batch preprocess IXI data.
@@ -165,6 +166,7 @@ def batch_preprocess(
                         mask_base_path=mask_base_path,
                         dataset_type=dataset_type,
                         split=split,
+                        mask_group=mask_group,
                     )
                 print(f'  [{split_label}] Processed merged file: {output_path}')
             continue
@@ -186,6 +188,7 @@ def batch_preprocess(
                     mask_base_path=mask_base_path,
                     dataset_type=dataset_type,
                     split=split,
+                    mask_group=mask_group,
                 )
                 print(f'  [{split_label}] Processed: {output_path}')
 

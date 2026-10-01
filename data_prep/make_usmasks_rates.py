@@ -22,6 +22,16 @@ def derive_seed(base_seed, mask_type, rate_pct):
     return zlib.crc32(key.encode('utf-8')) % (2 ** 32)
 
 
+def acc_name(rate_pct):
+    """Acceleration-factor name for a sampling rate percentage.
+
+    rate 10% keeps 1/10 of k-space -> '10'; 60% -> '1.67'; 100% -> '1'.
+    Matches the mask_<R>x.npy naming the whole pipeline (prepare_ixi,
+    build_mask_bank, SliceDataDev) already understands.
+    """
+    return f'{round(100.0 / rate_pct, 2):g}'
+
+
 def generate_group(base_path, image_size, seeds):
     Nx, Ny = image_size
     n_total = Nx * Ny
@@ -35,12 +45,13 @@ def generate_group(base_path, image_size, seeds):
 
             for rate in RATES:
                 pct = int(round(rate * 100))
+                acc = acc_name(pct)
                 combo_seed = derive_seed(base_seed, mask_type, pct)
 
                 # Fully sampled: no randomness involved, identical across seeds.
                 if rate >= 1.0:
                     mask = np.ones(image_size, dtype=float)
-                    print(f'{mask_type} seed{base_seed} rate{pct}%: fully sampled (seed unused)')
+                    print(f'{mask_type} seed{base_seed} {acc}x ({pct}%): fully sampled (seed unused)')
                 else:
                     # Reseed the global numpy RNG (used inside cartesian_mask/gaussian_mask).
                     np.random.seed(combo_seed)
@@ -53,7 +64,7 @@ def generate_group(base_path, image_size, seeds):
                         n_points = max(1, int(round(n_total * rate)))
                         mask = gaussian_mask(image_size, n_total / n_points)
 
-                mask_path = os.path.join(out_dir, f'mask_rate{pct}.npy')
+                mask_path = os.path.join(out_dir, f'mask_{acc}x.npy')
                 np.save(mask_path, mask)
 
                 n_nonzero = int(np.count_nonzero(mask))
@@ -64,11 +75,12 @@ def generate_group(base_path, image_size, seeds):
                     'group_seed': base_seed,
                     'rate_target': rate,
                     'rate_actual': round(actual_rate, 6),
+                    'acc_name': f'{acc}x',
                     'seed': combo_seed,
                     'nonzero': n_nonzero,
                     'file': os.path.relpath(mask_path, base_path),
                 })
-                print(f'  [OK] {mask_type} seed{base_seed} rate{pct}%: '
+                print(f'  [OK] {mask_type} seed{base_seed} {acc}x ({pct}%): '
                       f'{n_nonzero}/{mask.size} ({100 * actual_rate:.2f}%), seed={combo_seed}')
 
     info_path = os.path.join(usmasks_base, 'seed_info_rates.json')

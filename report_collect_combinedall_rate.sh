@@ -3,7 +3,7 @@
 MODEL='IXIT2test_keyrount_l1'
 BASE_PATH='/root/autodl-tmp/SHFormer-master'
 
-TRAIN_ACC_FACTORS='rate10,rate20,rate40,rate60,rate80,rate100'
+TRAIN_ACC_FACTORS='10x,5x,2.5x,1.67x,1.25x,1x'
 MASK_GROUP='seed42'
 
 for DATASET_TYPE in 'ixi_t2' #'mrbrain_flair' 'ixi_pd' 'ixi_t2'
@@ -11,7 +11,7 @@ for DATASET_TYPE in 'ixi_t2' #'mrbrain_flair' 'ixi_pd' 'ixi_t2'
     for MASK_TYPE in 'cartesian' #'gaussian'
         do
         RUN_DIR=${BASE_PATH}'/experiments/'${DATASET_TYPE}'/'${MASK_TYPE}'/acc_'${TRAIN_ACC_FACTORS}'/'${MODEL}'_'${MASK_GROUP}
-        for ACC_FACTOR in 'rate10' 'rate20' 'rate40' 'rate60' 'rate80' 'rate100'
+        for ACC_FACTOR in '10x' '5x' '2.5x' '1.67x' '1.25x' '1x'
             do
             echo ${DATASET_TYPE}','${MASK_TYPE}','${ACC_FACTOR}
             REPORT_PATH=${RUN_DIR}'/report_'${DATASET_TYPE}'_'${MASK_TYPE}'_'${ACC_FACTOR}'_'${MASK_GROUP}'.txt'

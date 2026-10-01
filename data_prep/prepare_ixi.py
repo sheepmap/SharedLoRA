@@ -42,6 +42,9 @@ def parse_args():
                         help='Output root for the datasets tree')
     parser.add_argument('--mask-base-path', default=DEFAULT_BASE_PATH,
                         help='Directory that contains usmasks/')
+    parser.add_argument('--mask-group', default='',
+                        help="Optional mask subdirectory group under usmasks/<ds>/<mask_type>/, "
+                             "e.g. seed42 for rate masks; empty = legacy flat layout")
     parser.add_argument('--acc-factors', default='4,8,16',
                         help='Comma list of acceleration factors; train uses the first, '
                              'validation/test store all factors merged (default: 4,8,16)')
@@ -57,7 +60,9 @@ def parse_args():
 
 
 def preprocess_dataset(args):
-    acc_factors = [int(x.strip()) for x in args.acc_factors.split(',') if x.strip()]
+    # Keep tokens as strings ('10', '2.5', ...) so non-integer acceleration
+    # factors flow through to mask filenames (mask_2.5x.npy) and h5 keys.
+    acc_factors = [x.strip() for x in args.acc_factors.split(',') if x.strip()]
     splits = tuple(s.strip() for s in args.splits.split(',') if s.strip())
 
     split_input_dirs = {}
@@ -82,6 +87,7 @@ def preprocess_dataset(args):
             mask_base_path=args.mask_base_path,
             splits=('train',),
             split_input_dirs=split_input_dirs,
+            mask_group=args.mask_group,
         )
 
     eval_splits = tuple(s for s in ('validation', 'test') if s in splits)
@@ -99,6 +105,7 @@ def preprocess_dataset(args):
             splits=eval_splits,
             merge_eval_acc_factors=True,
             split_input_dirs=split_input_dirs,
+            mask_group=args.mask_group,
         )
 
 
