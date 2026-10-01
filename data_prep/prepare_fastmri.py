@@ -45,12 +45,18 @@ def parse_args():
                         help='Output root for the datasets tree')
     parser.add_argument('--mask-base-path', default=str(BASE_DIR),
                         help='Directory that contains usmasks/')
+    parser.add_argument('--mask-group', default='',
+                        help="Optional mask subdirectory under usmasks/<ds>/<mask_type>/, "
+                             "e.g. seed42 for rate masks; empty = legacy flat layout")
     parser.add_argument('--acc-factors-train', default='4',
-                        help='Acceleration factors for the train split (default: 4)')
+                        help='Acceleration factor for the train split (default: 4)')
     parser.add_argument('--acc-factors', default='4,8,16',
                         help='Acceleration factors for validation/test, merged per volume (default: 4,8,16)')
     parser.add_argument('--splits', default='train,validation,test',
                         help='Comma list of splits to process (subset of train,validation,test)')
+    parser.add_argument('--volfs-only', action='store_true',
+                        help='Store volfs only for validation/test (no undersampled precompute; '
+                             'inputs are synthesized at inference, as in the rate-mask workflow)')
     parser.add_argument('--overwrite', action='store_true', help='Re-write existing output files')
     return parser.parse_args()
 
@@ -64,8 +70,10 @@ def main():
         'test': Path(args.test_dir) if args.test_dir else base / 'test',
     }
     splits = tuple(s.strip() for s in args.splits.split(',') if s.strip())
-    acc_train = [int(x.strip()) for x in args.acc_factors_train.split(',') if x.strip()]
-    acc_eval = [int(x.strip()) for x in args.acc_factors.split(',') if x.strip()]
+    # Keep tokens as strings ('4', '2.5', ...) so non-integer acceleration
+    # factors flow through to mask filenames (mask_2.5x.npy) and h5 keys.
+    acc_train = [x.strip() for x in args.acc_factors_train.split(',') if x.strip()]
+    acc_eval = [x.strip() for x in args.acc_factors.split(',') if x.strip()]
 
     runners = {
         'train': (dirs['train'], acc_train),
@@ -90,6 +98,8 @@ def main():
             acc_factors=acc_factors,
             merge_eval_acc_factors=(split != 'train'),
             overwrite=args.overwrite,
+            mask_group=args.mask_group,
+            volfs_only=args.volfs_only,
         )
 
     print('=' * 60)

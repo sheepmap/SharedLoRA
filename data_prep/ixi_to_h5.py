@@ -15,6 +15,7 @@ def preprocess_ixi_to_h5(
     dataset_type='ixi_pd',
     split='train',
     mask_group='',
+    volfs_only=False,
 ):
     """
     Convert one IXI NIfTI volume to the project's H5 format.
@@ -36,6 +37,10 @@ def preprocess_ixi_to_h5(
 
         if split == 'train':
             print('Train split: saved volfs only (no undersampled data)')
+            return
+
+        if volfs_only:
+            print('volfs only (undersampled fields will be synthesized at inference)')
             return
 
         if mask_base_path is None:
@@ -98,6 +103,7 @@ def batch_preprocess(
     merge_eval_acc_factors=False,
     split_input_dirs=None,
     mask_group='',
+    volfs_only=False,
 ):
     """
     Batch preprocess IXI data.
@@ -167,6 +173,7 @@ def batch_preprocess(
                         dataset_type=dataset_type,
                         split=split,
                         mask_group=mask_group,
+                        volfs_only=volfs_only,
                     )
                 print(f'  [{split_label}] Processed merged file: {output_path}')
             continue
@@ -189,6 +196,7 @@ def batch_preprocess(
                     dataset_type=dataset_type,
                     split=split,
                     mask_group=mask_group,
+                    volfs_only=volfs_only,
                 )
                 print(f'  [{split_label}] Processed: {output_path}')
 

@@ -55,10 +55,14 @@ except ModuleNotFoundError as exc:  # pragma: no cover - environment check
 VALID_SPLITS = ("train", "validation", "test")
 
 
-def parse_acc_factors(value: str) -> list[int]:
-    """Parse ``4,8,16`` or ``4x,8x,16x`` into positive integer factors."""
+def parse_acc_factors(value: str) -> list[str]:
+    """Parse ``4,8,16`` / ``4x,8x,16x`` / ``10,2.5,1.67`` into factor tokens.
 
-    factors: list[int] = []
+    Tokens are returned as strings so non-integer factors flow through to
+    mask filenames (mask_2.5x.npy) and h5 keys unchanged.
+    """
+
+    factors: list[str] = []
     for item in str(value).split(","):
         item = item.strip().lower()
         if not item:
@@ -66,19 +70,19 @@ def parse_acc_factors(value: str) -> list[int]:
         if item.endswith("x"):
             item = item[:-1]
         try:
-            factor = int(item)
+            number = float(item)
         except ValueError as exc:
             raise ValueError(f"Invalid acceleration factor: {item!r}") from exc
-        if factor <= 0:
-            raise ValueError(f"Acceleration factor must be positive: {factor}")
-        if factor not in factors:
-            factors.append(factor)
+        if number <= 0:
+            raise ValueError(f"Acceleration factor must be positive: {item}")
+        if item not in factors:
+            factors.append(item)
     if not factors:
         raise ValueError("At least one acceleration factor is required")
     return factors
 
 
-def factor_label(factor: int) -> str:
+def factor_label(factor: str | int) -> str:
     return f"{factor}x"
 
 
@@ -111,14 +115,11 @@ def _validate_rss(source: h5py.File, path: Path) -> tuple[h5py.Dataset, int, int
 
 
 def _load_mask(mask_base_path: Path, dataset_type: str, mask_type: str,
-               factor: int, height: int, width: int) -> np.ndarray:
-    mask_path = (
-        mask_base_path
-        / "usmasks"
-        / dataset_type
-        / mask_type
-        / f"mask_{factor_label(factor)}.npy"
-    )
+               factor: str, height: int, width: int, mask_group: str = "") -> np.ndarray:
+    parts = ["usmasks", dataset_type, mask_type]
+    if mask_group:
+        parts.append(mask_group)
+    mask_path = mask_base_path.joinpath(*parts) / f"mask_{factor_label(factor)}.npy"
     if not mask_path.exists():
         raise FileNotFoundError(f"Mask file not found: {mask_path}")
 
@@ -240,11 +241,13 @@ def process_file(
     source_path: Path,
     output_path: Path,
     split: str,
-    factors: list[int],
+    factors: list[str],
     mask_base_path: Path | None,
     dataset_type: str,
     mask_type: str,
     overwrite: bool,
+    mask_group: str = "",
+    precompute: bool = True,
 ) -> bool:
     """Convert one file and return whether a new output was written."""
 
@@ -261,11 +264,11 @@ def process_file(
         with h5py.File(source_path, "r") as source:
             rss, slices, height, width = _validate_rss(source, source_path)
             volume_min, volume_max = _volume_min_max(rss, slices)
-            if split != "train" and mask_base_path is None:
+            if split != "train" and precompute and mask_base_path is None:
                 raise ValueError("--mask-base-path is required for validation/test")
 
-            masks: dict[int, np.ndarray] = {}
-            if split != "train":
+            masks: dict[str, np.ndarray] = {}
+            if split != "train" and precompute:
                 assert mask_base_path is not None
                 for factor in factors:
                     masks[factor] = _load_mask(
@@ -275,6 +278,7 @@ def process_file(
                         factor,
                         height,
                         width,
+                        mask_group=mask_group,
                     )
 
             with h5py.File(temp_path, "w") as target:
@@ -294,7 +298,7 @@ def process_file(
                 )
                 _write_volfs(volfs, rss, slices, volume_min, volume_max)
 
-                if split != "train":
+                if split != "train" and precompute:
                     for factor in factors:
                         _write_undersampled_fields(
                             target,
@@ -314,7 +318,10 @@ def process_file(
             f"dtype=float32, normalized=[0,1], split={split}"
         )
         if split != "train":
-            print(f"     generated factors: {', '.join(factor_label(f) for f in factors)}")
+            if precompute:
+                print(f"     generated factors: {', '.join(factor_label(f) for f in factors)}")
+            else:
+                print("     volfs only (undersampled fields will be synthesized at inference)")
         return True
     except Exception:
         if temp_path.exists():
@@ -336,15 +343,21 @@ def batch_preprocess(
     mask_type: str = "cartesian",
     mask_base_path: str | Path | None = None,
     split: str = "train",
-    acc_factors: Iterable[int] = (4,),
+    acc_factors: Iterable[str | int] = (4,),
     merge_eval_acc_factors: bool = False,
     overwrite: bool = False,
+    mask_group: str = "",
+    volfs_only: bool = False,
 ) -> tuple[int, int]:
     """Process all HDF5 files in one already-defined dataset split.
 
     This is the programmatic entry point used by ``prepare_fastmri.py``.
     The function deliberately does not split files by ratio: the caller gives
     it the directory that is already designated as train, validation, or test.
+
+    ``volfs_only`` skips the img_volus_*/kspace_volus_* precompute for
+    validation/test (used by the rate-mask workflow, which synthesizes
+    undersampled inputs on the fly); masks are then not needed at all.
     """
 
     if split not in VALID_SPLITS:
@@ -407,6 +420,8 @@ def batch_preprocess(
             dataset_type,
             mask_type,
             overwrite,
+            mask_group=mask_group,
+            precompute=not volfs_only,
         ):
             written += 1
         else:
@@ -443,6 +458,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Store all validation/test factors in one multi_acc directory",
     )
+    parser.add_argument(
+        "--mask-group",
+        default="",
+        help="Optional mask subdirectory under usmasks/<ds>/<mask_type>/, "
+             "e.g. seed42 for rate masks; empty = legacy flat layout",
+    )
+    parser.add_argument(
+        "--volfs-only",
+        action="store_true",
+        help="Store volfs only for validation/test (no img_volus_*/kspace_volus_* "
+             "precompute; undersampled inputs are synthesized at inference)",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser
 
@@ -459,6 +486,8 @@ def main() -> int:
         acc_factors=parse_acc_factors(args.acc_factors),
         merge_eval_acc_factors=args.merge_eval_acc_factors,
         overwrite=args.overwrite,
+        mask_group=args.mask_group,
+        volfs_only=args.volfs_only,
     )
     return 0
 

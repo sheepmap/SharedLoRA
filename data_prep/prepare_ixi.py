@@ -43,8 +43,12 @@ def parse_args():
     parser.add_argument('--mask-base-path', default=DEFAULT_BASE_PATH,
                         help='Directory that contains usmasks/')
     parser.add_argument('--mask-group', default='',
-                        help="Optional mask subdirectory group under usmasks/<ds>/<mask_type>/, "
+                        help="Optional mask subdirectory under usmasks/<ds>/<mask_type>/, "
                              "e.g. seed42 for rate masks; empty = legacy flat layout")
+    parser.add_argument('--volfs-only', action='store_true',
+                        help='Store volfs only for validation/test (no img_volus_*/kspace_volus_* '
+                             'precompute; undersampled inputs are synthesized at inference, '
+                             'as in the rate-mask workflow)')
     parser.add_argument('--acc-factors', default='4,8,16',
                         help='Comma list of acceleration factors; train uses the first, '
                              'validation/test store all factors merged (default: 4,8,16)')
@@ -88,6 +92,7 @@ def preprocess_dataset(args):
             splits=('train',),
             split_input_dirs=split_input_dirs,
             mask_group=args.mask_group,
+            volfs_only=args.volfs_only,
         )
 
     eval_splits = tuple(s for s in ('validation', 'test') if s in splits)
@@ -106,6 +111,7 @@ def preprocess_dataset(args):
             merge_eval_acc_factors=True,
             split_input_dirs=split_input_dirs,
             mask_group=args.mask_group,
+            volfs_only=args.volfs_only,
         )
 
 
