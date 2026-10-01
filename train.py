@@ -272,17 +272,28 @@ def main(args):
     if args.resume:
         print('resuming model, batch_size', args.batch_size)
         checkpoint, model, optimizer = load_model(args.checkpoint)
-        args = checkpoint['args']
+        ckpt_args = checkpoint['args']
         best_psnr = checkpoint.get('best_psnr', 0.)
         start_epoch = checkpoint['epoch'] + 1
-        # CosineAnnealingLR instead of StepLR: with lr_step_size=40 the LR would not
-        # decay even once in short runs (e.g. 10 epochs); cosine decays smoothly.
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=args.lr_eta_min)
-        if 'scheduler' in checkpoint:
+
+        lr_changed = abs(args.lr - ckpt_args.lr) > 1e-12
+        remaining = max(1, args.num_epochs - start_epoch)
+        if lr_changed:
+            # New LR from the command line: jump to it immediately and re-run
+            # cosine annealing over the remaining epochs.
+            print(f'LR changed on resume: {ckpt_args.lr} -> {args.lr}; '
+                  f'new cosine over remaining {remaining} epochs')
+            for group in optimizer.param_groups:
+                group['lr'] = args.lr
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=remaining, eta_min=args.lr_eta_min)
+        elif 'scheduler' in checkpoint:
+            # Same LR: restore the saved trajectory exactly as before.
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=ckpt_args.num_epochs, eta_min=args.lr_eta_min)
             scheduler.load_state_dict(checkpoint['scheduler'])
         else:
             # Old checkpoints carry no scheduler state: fast-forward it and
             # override the LR with the command-line value.
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=args.lr_eta_min)
             for _ in range(start_epoch):
                 scheduler.step()
             optimizer.param_groups[0]['lr'] = args.lr
