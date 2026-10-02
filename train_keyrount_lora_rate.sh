@@ -12,7 +12,9 @@ DATA_ACC_FACTOR='10x' # acceleration factor directory of the stored data (train 
 MASK_GROUP='seed42'
 BATCH_SIZE=5
 NUM_EPOCHS=3
-LR=1e-4
+LR=2e-5
+# Gate-net runaway guard: cap the global gradient norm (0 disables).
+GRAD_CLIP=1.0
 DEVICE='cuda:0'
 EXP_DIR=${BASE_PATH}'/experiments/'${DATASET_TYPE}'/'${MASK_TYPE}'/acc_'${ACC_FACTORS}'/'${MODEL}'_'${MASK_GROUP}
 TRAIN_PATH=${BASE_PATH}'/datasets/'
@@ -95,5 +97,5 @@ python train_keyrount_lora.py \
     --melora_r ${MELORA_R} \
     --melora_alpha ${MELORA_ALPHA} \
     --melora_dropout ${MELORA_DROPOUT} \
-    --melora_target ${MELORA_TARGET} \
+    --melora_target ${MELORA_TARGET} --grad-clip ${GRAD_CLIP} \
     ${PEFT_GATE_ARGS}
