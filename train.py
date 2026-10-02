@@ -15,6 +15,7 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from dataset import SliceData,SliceDisplayDataDev
 from models import DnCn
+from utils import cartesian_mask, gaussian_mask
 import torchvision
 from torch import nn
 from torch.autograd import Variable
@@ -84,16 +85,32 @@ def build_mask_bank(acc_factors, mask_types, dataset_types, usmask_path, device)
     return mask_bank
 
 
-def gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, mask_types, dataset_types):
-    """Perform FFT, masking, and IFFT on GPU using pre-loaded fixed masks."""
+def gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, mask_types, dataset_types, mask_resample=False):
+    """Perform FFT, masking, and IFFT on GPU.
+
+    mask_resample restores the original SHFormer training protocol: a fresh
+    random mask is drawn per sample with the original generators
+    (cartesian_mask/gaussian_mask) instead of reusing one fixed pattern, so
+    the network learns the sampling distribution rather than a single
+    realization. Masks are generated in memory only -- nothing is saved.
+    """
     B = target.shape[0]
     masks = []
     for i in range(B):
         di = ds_idx[i].item() if hasattr(ds_idx[i], 'item') else ds_idx[i]
         mi = mask_idx[i].item() if hasattr(mask_idx[i], 'item') else mask_idx[i]
         ai = acc_idx[i].item() if hasattr(acc_idx[i], 'item') else acc_idx[i]
-        key = (dataset_types[di], mask_types[mi], acc_factors[ai])
-        masks.append(mask_bank[key])
+        if mask_resample:
+            h, w = target.shape[-2], target.shape[-1]
+            acc_val = float(str(acc_factors[ai]).rstrip('x').replace('_', '.'))
+            if mask_types[mi] == 'cartesian':
+                m = cartesian_mask((h, w), acc_val)
+            else:
+                m = gaussian_mask((h, w), acc_val)
+            masks.append(torch.from_numpy(np.asarray(m)).to(target.device))
+        else:
+            key = (dataset_types[di], mask_types[mi], acc_factors[ai])
+            masks.append(mask_bank[key])
     mask = torch.stack(masks)                                          # (B, H, W)
     kspace = torch.fft.fft2(target, norm='ortho')                     # GPU FFT
     us_kspace = kspace * mask.unsqueeze(1)
@@ -101,7 +118,7 @@ def gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, m
     return us_img.unsqueeze(1), torch.view_as_real(us_kspace), mask
 
 
-def train_epoch(args, epoch, model,data_loader, optimizer, writer, mask_bank, acc_factors, mask_types, dataset_types):
+def train_epoch(args, epoch, model,data_loader, optimizer, writer, mask_bank, acc_factors, mask_types, dataset_types, mask_resample=False):
 
     model.train()
     avg_loss = 0.
@@ -112,7 +129,7 @@ def train_epoch(args, epoch, model,data_loader, optimizer, writer, mask_bank, ac
 
         target, acc_idx, mask_idx, ds_idx = data
         target = target.unsqueeze(1).to(args.device)
-        us_input, input_kspace, mask = gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, mask_types, dataset_types)
+        us_input, input_kspace, mask = gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, mask_types, dataset_types, mask_resample=mask_resample)
 
         us_input = us_input.squeeze(1).float()  # [B, 1, 1, H, W] -> [B, 1, H, W]
         input_kspace = input_kspace.squeeze(1).float()  # [B, 1, H, W, 2] -> [B, H, W, 2]
@@ -139,7 +156,7 @@ def train_epoch(args, epoch, model,data_loader, optimizer, writer, mask_bank, ac
     return avg_loss, time.perf_counter() - start_epoch
 
 
-def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, mask_types, dataset_types):
+def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, mask_types, dataset_types, mask_resample=False):
 
     model.eval()
     losses = []
@@ -152,7 +169,7 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
 
             target, acc_idx, mask_idx, ds_idx = data
             target = target.unsqueeze(1).to(args.device)
-            us_input, input_kspace, mask = gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, mask_types, dataset_types)
+            us_input, input_kspace, mask = gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, mask_types, dataset_types, mask_resample=mask_resample)
 
             us_input = us_input.squeeze(1).float()  # [B, 1, 1, H, W] -> [B, 1, H, W]
             input_kspace = input_kspace.squeeze(1).float()  # [B, 1, H, W, 2] -> [B, H, W, 2]
@@ -184,7 +201,7 @@ def evaluate(args, epoch, model, data_loader, writer, mask_bank, acc_factors, ma
     return avg_loss, avg_psnr, avg_ssim, time.perf_counter() - start
 
 
-def visualize(args, epoch, model, data_loader, writer, datasettype_string, mask_bank=None, acc_factors=None, mask_types=None, dataset_types=None):
+def visualize(args, epoch, model, data_loader, writer, datasettype_string, mask_bank=None, acc_factors=None, mask_types=None, dataset_types=None, mask_resample=False):
 
 
     def save_image(image, tag):
@@ -200,7 +217,7 @@ def visualize(args, epoch, model, data_loader, writer, datasettype_string, mask_
                 # SliceData returns (target, acc_idx, mask_idx, ds_idx)
                 target, acc_idx, mask_idx, ds_idx = data
                 target = target.unsqueeze(1).to(args.device)
-                us_input, input_kspace, mask = gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, mask_types, dataset_types)
+                us_input, input_kspace, mask = gpu_undersample(target, acc_idx, mask_idx, ds_idx, mask_bank, acc_factors, mask_types, dataset_types, mask_resample=mask_resample)
                 us_input = us_input.squeeze(1).float()  # [B, 1, 1, H, W] -> [B, 1, H, W]
                 input_kspace = input_kspace.squeeze(1).float()  # [B, 1, H, W, 2] -> [B, H, W, 2]
             else:
@@ -321,14 +338,17 @@ def main(args):
     acc_factors = args.acceleration_factor.split(',')
     mask_types = args.mask_type.split(',')
     dataset_types = args.dataset_type.split(',')
-    mask_bank = build_mask_bank(acc_factors, mask_types, dataset_types, args.usmask_path, args.device)
+    # With --mask-resample the masks are generated fresh per sample inside
+    # gpu_undersample; no pre-loaded bank is needed (or required to exist).
+    mask_bank = {} if args.mask_resample else \
+        build_mask_bank(acc_factors, mask_types, dataset_types, args.usmask_path, args.device)
 
     for epoch in range(start_epoch, args.num_epochs):
 
-        train_loss,train_time = train_epoch(args, epoch, model, train_loader,optimizer,writer, mask_bank, acc_factors, mask_types, dataset_types)
-        dev_loss, dev_psnr, dev_ssim, dev_time = evaluate(args, epoch, model, dev_loader, writer, mask_bank, acc_factors, mask_types, dataset_types)
+        train_loss,train_time = train_epoch(args, epoch, model, train_loader,optimizer,writer, mask_bank, acc_factors, mask_types, dataset_types, mask_resample=args.mask_resample)
+        dev_loss, dev_psnr, dev_ssim, dev_time = evaluate(args, epoch, model, dev_loader, writer, mask_bank, acc_factors, mask_types, dataset_types, mask_resample=args.mask_resample)
         visualize(args, epoch, model, display1_loader, writer, 't1',
-                  mask_bank, acc_factors, mask_types, dataset_types)
+                  mask_bank, acc_factors, mask_types, dataset_types, mask_resample=args.mask_resample)
         scheduler.step()
 
         is_new_best = dev_psnr > best_psnr
@@ -379,6 +399,11 @@ def create_arg_parser():
     parser.add_argument('--dataset_type',type=str,help='cardiac,kirby')
     parser.add_argument('--usmask_path',type=str,help='us mask path')
     parser.add_argument('--mask_type',type=str,help='mask type - cartesian, gaussian')
+    parser.add_argument('--mask-resample', action='store_true',
+                        help='Draw a fresh random mask per training/validation sample with the '
+                             'original generators (nothing is saved) so the model learns the '
+                             'sampling distribution instead of one fixed pattern; mask_bank is '
+                             'then not required')
 
     return parser
 
