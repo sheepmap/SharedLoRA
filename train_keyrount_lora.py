@@ -360,6 +360,13 @@ def train_epoch(args, epoch, model, data_loader, optimizer, scheduler, writer,
         loss.backward()
         del output
 
+        if getattr(args, 'grad_clip', 0):
+            # Cap the global gradient norm: without this the gate net can be
+            # pushed into a runaway feedback on hard rates (output gain growing
+            # epoch over epoch until that rate's reconstructions collapse).
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            writer.add_scalar('GradNorm', float(grad_norm), global_step + iter)
+
         optimizer.step()
         scheduler.step()
 
@@ -1008,6 +1015,8 @@ def create_arg_parser():
                         help='PiSSA SVD rank for each targeted convolution')
     parser.add_argument('--pissa-alpha', type=float, default=8.0,
                         help='PiSSA adapter scaling value (rank is the standard setting)')
+    parser.add_argument('--grad-clip', type=float, default=1.0,
+                        help='Max global gradient norm for clipping (0 disables; default 1.0)')
     parser.add_argument('--use-lora-gate-net', action='store_true',
                         help='Enable LoRA gate net conditioning; if unset, use standard ConvLoRA training')
     parser.add_argument('--use-lora-ab-gate', dest='use_lora_ab_gate', action='store_true', default=True,
