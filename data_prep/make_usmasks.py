@@ -4,7 +4,6 @@ import sys
 import json
 import zlib
 
-# src/ root (where utils.py lives); this file sits in src/data_prep/
 SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, SRC_DIR)
 
@@ -18,14 +17,7 @@ def derive_seed(base_seed, dataset_type, mask_type, acc):
 
 
 def generate_masks(base_path, image_size=(320, 320), dataset_types=None,
-                   acc_factors=(1, 2, 4, 8, 10), seeds=(42, 43, 44, 45, 46)):
-    """Generate gaussian rate masks (rate = 1/acc) for several seed groups.
-
-    Each seed group lands in its own sub-directory
-    usmasks/<dataset_type>/<mask_type>/seed<N>/mask_<acc>x.npy, matching the
-    --mask_group / --mask-groups conventions of the training scripts. acc <= 1
-    is fully sampled (all ones); gaussian_mask(size, 1.0) would never converge.
-    """
+                   acc_factors=(2, 4, 8, 10), seeds=(49,)):
     all_dataset_types = ['mrbrain_t1', 'mrbrain_flair', 'ixi_pd', 'ixi_t2', 'fastmri_knee']
     if dataset_types:
         unknown = [d for d in dataset_types if d not in all_dataset_types]
@@ -82,21 +74,12 @@ def generate_masks(base_path, image_size=(320, 320), dataset_types=None,
                   f, indent=2, ensure_ascii=False)
     print(f'Seed info saved to: {seed_info_path}')
 
-    print('=' * 60)
-    print('All masks generated successfully!')
-    print('=' * 60)
-
 
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Generate undersampling masks')
-    parser.add_argument('--dataset-types', default='fastmri_knee',
-                        help='Comma-separated dataset types to generate (default: fastmri_knee)')
+    parser.add_argument('--dataset-types', default='fastmri_knee')
     args = parser.parse_args()
     base_path = os.path.dirname(SRC_DIR)
     dataset_types = [d.strip() for d in args.dataset_types.split(',') if d.strip()]
-    print(f'Base path: {base_path}')
-    print(f'Dataset types: {dataset_types}')
-    print(f'Masks will be saved to: {os.path.join(base_path, "usmasks")}')
-    print()
     generate_masks(base_path, dataset_types=dataset_types)

@@ -22,12 +22,13 @@ inference and evaluation.
 
 ## 1. Environment
 
-Create the conda environment from the yml (Python 3.10.20, CPU-side dependencies,
-without PyTorch), then install PyTorch matching your hardware:
+Create a conda environment from `environment.yml` (Python 3.10.x and CPU-side
+dependencies, without PyTorch). Choose the environment name yourself by replacing
+`my_env` below:
 
 ```bash
-conda env create -f environment-test.yml   # creates an env named "test"
-conda activate test
+conda env create -f environment.yml -n my_env
+conda activate my_env
 ```
 
 Install PyTorch manually for your CUDA version (see https://pytorch.org for the full
@@ -59,7 +60,7 @@ usmasks/<dataset_type>/<mask_type>/seed<N>/mask_<k>x.npy              # rate-mas
 | Step                          | Command                                                                                                         |
 | ----------------------------- | --------------------------------------------------------------------------------------------------------------- |
 | Generate sampling masks       | `python data_prep/make_usmasks.py`                                                                              |
-| Generate rate masks           | `python data_prep/make_usmasks_rates.py` (see below)                                                            |
+| Generate rate masks           | `python legacy/rate/data_prep/make_usmasks_rates.py` (historical only)                                                            |
 | Preprocess IXI                | `python data_prep/prepare_ixi.py --input-dir <dir-with-nii.gz> --dataset-type ixi_t2`                           |
 | Preprocess fastMRI            | `python data_prep/prepare_fastmri.py --input-dir <root-with-train-validation-test> --dataset-type fastmri_knee` |
 | Export reconstructions to PNG | edit paths in `data_prep/h5_to_png.py`, then run it                                                             |
@@ -88,7 +89,7 @@ reproducible. `--seed` (default 42) and `--dataset-types` select the base seed
 and a subset of datasets; every generated mask is recorded with its derived
 seed in `usmasks/seed_info.json`.
 
-### 2.2 Rate-mask groups (fixed sampling ratios, multiple seeds)
+### 2.2 Legacy rate-mask groups (historical only)
 
 `make_usmasks_rates.py` generates masks at fixed sampling ratios
 (10/20/40/60/80/100%) in several seed groups, named by acceleration factor
@@ -96,9 +97,9 @@ seed in `usmasks/seed_info.json`.
 
 ```bash
 # IXI-T2 (256x256), 5 groups: seed42..seed46
-python data_prep/make_usmasks_rates.py --dataset-type ixi_t2 --image-size 256,256
+python legacy/rate/data_prep/make_usmasks_rates.py --dataset-type ixi_t2 --image-size 256,256
 # fastMRI knee (320x320)
-python data_prep/make_usmasks_rates.py --dataset-type fastmri_knee --image-size 320,320
+python legacy/rate/data_prep/make_usmasks_rates.py --dataset-type fastmri_knee --image-size 320,320
 ```
 
 Masks land in `usmasks/<dataset_type>/<mask_type>/seed<N>/mask_<R>x.npy`;
@@ -107,7 +108,7 @@ sampling positions while the sampling ratio stays exact. All provenance
 (group seed, derived seed, actual ratio per mask) is recorded in
 `usmasks/seed_info_rates.json`.
 
-### 2.3 Preprocessing for rate masks
+### 2.3 Legacy preprocessing for rate masks
 
 Pass `--mask-group seed42` to read masks from the group sub-directory, and
 `--volfs-only` to store `volfs` only (no `img_volus_*`/`kspace_volus_*`
@@ -135,74 +136,46 @@ required by the legacy `valid.py` path that reads `img_volus_<k>x`).
 bash train_combinedall.sh
 ```
 
-**PEFT fine-tuning** — the proposed method and all baselines share the entry point
-`train_keyrount_lora.py`; `train_shared_lora.sh` configures every method and switches
-between them via `PEFT_METHOD`, all starting from the same frozen base `best_model.pt`:
-
-| Method                 | `PEFT_METHOD` | Configuration                                                                                                                   |
-| ---------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| **Shared LoRA (ours)** | `shared_lora` | single-branch adapter shared across all acceleration factors; a gate net predicts per-layer scales from the acceleration factor |
-| ConvLoRA               | `convlora`    | same single-branch adapter without the gate net — one independent adapter per acceleration factor                               |
-| MELoRA (segmented)     | `melora`      | chunked `MELORA_R` (e.g. `"8,8"`) — hierarchical branches                                                                       |
-| DoRA                   | `dora`        | magnitude + direction decomposition                                                                                             |
-| PiSSA                  | `pissa`       | SVD-residual initialization                                                                                                     |
-
-Edit `PRETRAINED_CHECKPOINT` and the paths at the top of `train_shared_lora.sh`, then:
+**Canonical PEFT fine-tuning** — run the FastMRI MELoRA workflow with:
 
 ```bash
-PEFT_METHOD="shared_lora"  # shared_lora | convlora | melora | dora | pissa
-bash train_shared_lora.sh
+bash train_keyrount_lora.sh
 ```
 
-The fine-grained A/B-gate ablation runs the `shared_lora` mode with `--use-lora-ab-gate`.
+The canonical entrypoint uses `fastmri_knee`, `gaussian`, `seed49`, and the available
+integer factors `2x,4x,8x,10x`. It writes adapters and checkpoints under one run directory.
 
-Resume an interrupted run:
+`train_shared_lora.sh` remains available for shared/convlora and other PEFT experiments,
+but is not part of the default workflow.
+
+Resume an interrupted run directly with:
 
 ```bash
 python train_keyrount_lora.py --resume --checkpoint /path/to/checkpoint.pt
 ```
 
-### 3.1 Rate-mask experiments (seed groups)
-
-`train_keyrount_lora_rate.sh` trains with rate masks from one seed group
-(`--mask_group seed42` via `MASK_GROUP`, acceleration list
-`10x,5x,2.5x,1.67x,1.25x,1x`); the experiment directory carries a `_seed<N>`
-suffix so the groups do not collide. Masks are loaded from
-`usmasks/<ds>/<mask_type>/<mask_group>/mask_<R>x.npy` and the gate net
-receives the true acceleration factor read from the name. Switching groups
-means changing `MASK_GROUP` in the script (and using the matching data from
-the same group's preprocessing).
+The former rate-mask scripts and `make_usmasks_rates.py` are retained under
+`legacy/rate/` for historical reproduction only. They are not used by the default workflow.
 
 ## 4. Inference
 
-Edit `valid_combinedall.sh` (`USE_LORA=true`, `LORA_PATH` pointing to `adapter.pt` or
-`adapter_best.pt`), then:
+Run the matching validation entrypoint after training:
 
 ```bash
 bash valid_combinedall.sh
 ```
 
-`valid.py` reads `peft_method` from the `checkpoint.pt` saved next to the adapter, so the
-adapter type does not need to be passed manually.
-
-For rate-mask experiments run `valid_combinedall_rate.sh` instead: it loops
-`10x..1x` against a rate-trained run directory and passes `--mask_group`, so
-`valid.py` synthesizes the undersampled inputs on the fly from `volfs` using
-the same seed group's masks (the h5 files produced with `--volfs-only` contain
-no precomputed inputs).
+It uses the same model, checkpoint, adapter, mask group, run directory, and integer
+acceleration factors as `train_keyrount_lora.sh`.
 
 ## 5. Evaluation
 
-Edit `evaluate_combinedall.sh` (`USE_ADAPTER_RESULTS=true`, `ADAPTER_RESULTS_PATH` to the
-reconstruction folder), then:
+Evaluate the `results_<factor>` directories produced by validation:
 
 ```bash
 bash evaluate_combinedall.sh
 ```
 
-For rate-mask experiments run `evaluate_combinedall_rate.sh` (per-rate reports
-named `report_<ds>_<mask_type>_<R>x_<seed>.txt`) and print them with
-`report_collect_combinedall_rate.sh`.
-
 `evaluate.py` compares ground-truth and reconstructed H5 files and reports
 MSE / NMSE / PSNR / SSIM / HFN.
+

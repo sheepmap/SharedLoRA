@@ -1,3 +1,7 @@
+# Legacy compatibility entrypoint for the original IXI-T2 PEFT experiments.
+# It calls the same train_keyrount_lora.py implementation as train_keyrount_lora.sh.
+# For the current cloud FastMRI workflow, use train_keyrount_lora.sh instead and
+# select PEFT_METHOD=shared_lora, convlora, melora, dora, or pissa there.
 MODEL='IXIT2test_peft'
 BASE_PATH='/root/autodl-tmp/SHFormer-master'
 PRETRAINED_CHECKPOINT='/root/autodl-tmp/SHFormer-master/experiments/ixi_t2/cartesian/acc_4x/IXIT2test/best_model.pt'
@@ -102,3 +106,4 @@ python train_keyrount_lora.py \
     ${PEFT_EXTRA_ARGS} \
     ${MELORA_ARGS} \
     ${PEFT_GATE_ARGS}
+
