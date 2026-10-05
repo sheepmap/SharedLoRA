@@ -77,9 +77,32 @@ def generate_masks(base_path, image_size=(320, 320), dataset_types=None,
 
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser(description='Generate undersampling masks')
-    parser.add_argument('--dataset-types', default='fastmri_knee')
+    parser = argparse.ArgumentParser(description='Generate undersampling masks '
+                                     '(gaussian, one directory group per seed)')
+    parser.add_argument('--dataset-types', default='fastmri_knee',
+                        help='Comma-separated dataset names to generate masks for '
+                             '(default: fastmri_knee)')
+    parser.add_argument('--seeds', default='49',
+                        help='Comma-separated base seeds, one mask group per seed '
+                             '(default: 49)')
+    parser.add_argument('--acc-factors', default='2,4,8,10',
+                        help='Comma-separated acceleration factors; 1 means fully sampled '
+                             '(default: 2,4,8,10)')
+    parser.add_argument('--image-size', default='320,320',
+                        help='Mask size as H,W (default: 320,320; use 256,256 for IXI-T2)')
     args = parser.parse_args()
+
     base_path = os.path.dirname(SRC_DIR)
     dataset_types = [d.strip() for d in args.dataset_types.split(',') if d.strip()]
-    generate_masks(base_path, dataset_types=dataset_types)
+    seeds = [int(s) for s in args.seeds.split(',') if s.strip()]
+    image_size = tuple(int(v) for v in args.image_size.split(','))
+    acc_factors = []
+    for token in args.acc_factors.split(','):
+        token = token.strip()
+        if not token:
+            continue
+        value = float(token)
+        acc_factors.append(int(value) if value.is_integer() else value)
+
+    generate_masks(base_path, image_size=image_size, dataset_types=dataset_types,
+                   acc_factors=acc_factors, seeds=seeds)
