@@ -1,0 +1,168 @@
+二、目录和路径
+--------------
+训练脚本中的 BASE_PATH 是数据、mask 和实验结果的共同根目录。例如：
+BASE_PATH='/root/autodl-tmp'
+
+程序会使用：
+<BASE_PATH>/datasets/       处理后的 H5 数据
+<BASE_PATH>/usmasks/        undersampling mask
+<BASE_PATH>/experiments/    模型和训练结果
+
+三、生成 mask
+-------------
+使用固定 mask 时，先运行：
+python data_prep/make_usmasks.py --dataset-types fastmri_knee --seeds 45 --acc-factors 2,4,8,10
+
+脚本默认生成到：
+<项目根目录>/usmasks/fastmri_knee/gaussian/seed45/
+
+四、train_combinedall.sh 的 mask 位置
+------------------------------------------
+当前 train_combinedall.sh 的实际命令带有：
+--mask-resample
+
+这表示训练时在线随机生成 mask，不读取 usmasks 中的 .npy 文件。
+
+如果要使用固定 mask，需要从 train_combinedall.sh 最后一条 python 命令中删除：
+--mask-resample
+
+删除后，train.py 只会从下面这个目录读取 mask：
+<BASE_PATH>/usmasks/<DATASET_TYPE>/<MASK_TYPE>/
+
+例如当前配置为：
+DATASET_TYPE='fastmri_knee'
+MASK_TYPE='gaussian'
+BASE_PATH='/root/autodl-tmp'
+
+则 mask 必须直接放在：
+/root/autodl-tmp/usmasks/fastmri_knee/gaussian/
+
+文件名必须类似：
+mask_2x.npy
+mask_4x.npy
+mask_8x.npy
+mask_10x.npy
+
+五、使用 train_combinedall.sh 训练基础模型
+------------------------------------------
+打开 train_combinedall.sh，主要修改：
+
+MODEL='fastmritest'       实验名称
+BASE_PATH='/root/autodl-tmp' 数据根目录
+DATASET_TYPE='fastmri_knee' 数据集目录名
+MASK_TYPE='gaussian'      mask 类型
+ACC_FACTORS='5x'          加速因子；多个值用逗号，例如 '2x,4x,8x'
+BATCH_SIZE=4              显存不足时调小
+NUM_EPOCHS=15             训练轮数
+LR=1e-4                   学习率
+DEVICE='cuda:0'           GPU；没有 GPU 时可用 cpu
+
+训练数据目录必须与配置匹配。例如 ACC_FACTORS='5x' 时，通常需要：
+<BASE_PATH>/datasets/fastmri_knee/gaussian/train/acc_5x/
+<BASE_PATH>/datasets/fastmri_knee/gaussian/validation/acc_5x/
+
+运行：
+bash train_combinedall.sh
+
+六、使用 train_keyrount_lora.sh 微调
+-----------------------------------
+该脚本需要已有基础模型。主要修改：
+
+PRETRAINED_CHECKPOINT  基础模型 best_model.pt 的完整路径
+BASE_PATH              数据和实验根目录
+DATASET_TYPE、MASK_TYPE 数据集和 mask 类型
+ACC_FACTORS             训练使用的因子，例如 '2x,8x,10x'
+TRAIN_ACC_FACTORS        必须与 ACC_FACTORS 保持一致
+DATA_ACC_FACTOR          实际读取的数据目录，例如 '10x'
+MASK_GROUP               固定 mask 子目录，例如 'seed45'
+PEFT_METHOD              shared_lora、melora、convlora、dora 或 pissa
+
+运行：
+bash train_keyrount_lora.sh
+
+七、data_prep 数据预处理
+------------------------
+1. fastMRI
+
+原始目录应包含：
+原始目录/train/
+原始目录/validation/
+原始目录/test/
+
+示例：
+python data_prep/prepare_fastmri.py --input-dir /data/fastmri_root --dataset-type fastmri_knee --mask-type gaussian --mask-group seed45 --mask-base-path /root/autodl-tmp --acc-factors-train 10 --acc-factors 2,4,8,10 --volfs-only
+
+输出通常为：
+<BASE_PATH>/datasets/fastmri_knee/gaussian/train/acc_10x/
+<BASE_PATH>/datasets/fastmri_knee/gaussian/validation/multi_acc/
+<BASE_PATH>/datasets/fastmri_knee/gaussian/test/multi_acc/
+
+2. IXI
+
+输入目录中放置 .nii.gz 文件：
+python data_prep/prepare_ixi.py --input-dir /data/ixi --dataset-type ixi_t2 --mask-type gaussian --mask-group seed45 --mask-base-path /root/autodl-tmp --acc-factors 10 --volfs-only
+
+默认按 80%/10%/10% 划分 train、validation、test。
+
+3. 常用参数
+
+--output-dir       修改 H5 输出根目录
+--mask-base-path   指定包含 usmasks/ 的目录
+--mask-group       指定 seed 子目录
+--acc-factors      验证/测试使用的加速因子
+--volfs-only       验证/测试只保存全采样数据，推理时在线生成欠采样输入
+--overwrite        fastMRI 已有输出时允许覆盖
+
+八、验证和评估
+--------------
+先验证生成重建 H5，再评估指标。以下默认配置是示例，运行前必须按自己的实验修改。
+
+1. valid_combinedall.sh：加载模型，生成重建结果
+
+顶部参数：
+MODEL              与训练时相同的实验名称。
+BASE_PATH          与训练时相同的数据和实验根目录。
+DATASET_TYPE       数据集名，例如 fastmri_knee。
+MASK_TYPE          mask 类型，例如 gaussian。
+TRAIN_ACC_FACTORS  训练实验目录中的原始字符串，例如 '2x,8x,10x'；顺序、逗号必须一致。
+ACC_FACTORS        本次要推理的因子，用空格分隔，例如 '2x 4x 8x 10x'。
+                   可以包含未参与训练的因子，但必须有对应 mask。
+MASK_GROUP         mask 子目录，例如 seed45；每个因子的 mask 必须存在。
+BATCH_SIZE         推理批大小，建议先用 1；显存不足时调小。
+DEVICE             推理设备，例如 cuda:0。
+PEFT_METHOD        必须与训练方法一致。
+MELORA_TARGET      必须与训练时一致，用于定位适配器目录。
+DORA_RANK/ALPHA    使用 dora 时，必须与训练的 rank/alpha 一致。
+PISSA_RANK/ALPHA   使用 pissa 时，必须与训练的 rank/alpha 一致。
+
+如果按默认 shared_lora 训练，验证时必须改为 PEFT_METHOD='shared_lora'。
+如果自行修改过 MELoRA/ConvLoRA 的 rank，也要修改验证脚本 case 分支中的 MELORA_R。
+
+脚本当前带 --use_lora，因此默认用于微调模型。
+若只推理 train_combinedall.sh 训练的基础模型：删除实际 python 命令中的
+--use_lora 和 --lora_path "${LORA_PATH}"，将 CHECKPOINT 改成基础模型 best_model.pt，
+并将 RUN_DIR 改成希望保存推理结果的实际实验目录。
+使用 MASK_GROUP='seed45' 推理时仍要准备该 seed 目录中的固定 mask，
+
+确认配置后运行：
+bash valid_combinedall.sh
+
+2. evaluate_combinedall.sh：比较重建结果与真值，计算指标
+
+MODEL、BASE_PATH、DATASET_TYPE、MASK_TYPE、TRAIN_ACC_FACTORS、MASK_GROUP：
+与上述验证脚本保持一致，确保生成的 RUN_DIR 是同一个实验目录。
+ACC_FACTORS：要评估的因子，用空格分隔，例如 '2x 4x 8x 10x'；
+每个因子必须已经完成推理，并有对应 results_<因子> 文件夹。
+
+路径和报告参数：
+RUN_DIR                指向验证结果所在实验目录；手动改过验证 RUN_DIR 时，这里也要改。
+TARGET_PATH            真值 H5 目录，必须与推理的 DATA_PATH 对应同一批数据。
+                       当前路径中的 gaussian/test/multi_acc 是写死的，需要按实际数据修改。
+PREDICTIONS_PATH       自动设为 <RUN_DIR>/results_<因子>/，读取该因子的重建 H5。
+REPORT_FILE_ACC_FACTOR 报告文件名中的标识，默认跟随 TRAIN_ACC_FACTORS；通常不用改。
+
+确认真值和预测目录中有对应的 H5 文件后运行：
+bash evaluate_combinedall.sh
+
+报告保存在 RUN_DIR，名称类似：
+report_fastmri_knee_gaussian_2x,8x,10x.txt

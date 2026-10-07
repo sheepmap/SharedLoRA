@@ -109,6 +109,8 @@ bash valid_combinedall.sh
 
 Reconstructions are written to `<RUN_DIR>/results_<factor>/`.
 
+You can obtain the test data (fastMRI) from [ModelScope](https://www.modelscope.cn/datasets/sheepmap/shared_lora_data_test).
+
 ## 6. Evaluation
 
 ```bash

@@ -18,7 +18,7 @@ DEVICE='cuda:0'
 # Must match the training entrypoint's PEFT_METHOD. The adapter subdirectory
 # below is generated from this value and the same rank/target/gate rules used
 # by train_keyrount_lora.py; do not type the long adapter path manually.
-PEFT_METHOD='melora'
+PEFT_METHOD='shared_lora'
 MELORA_TARGET='down_sample_layers.0,up_sample_layers.0.layers,up_sample_layers.1.layers,up_sample_layers.2.layers'
 DORA_RANK=8
 DORA_ALPHA=16
