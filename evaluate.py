@@ -99,7 +99,7 @@ def write_aggregated_report(report_file, acc_factor, metrics_report):
     replaced_current = False
 
     for line in report_lines:
-        if line.startswith('[AVG]'):
+        if line.startswith('[AVG]') or line.startswith('[VAR]'):
             continue
         if line.startswith(f'[{acc_factor}]'):
             if not replaced_current:
@@ -122,7 +122,12 @@ def write_aggregated_report(report_file, acc_factor, metrics_report):
             name: float(np.mean([row[name] for row in metric_rows]))
             for name in METRIC_NAMES
         }
+        overall_variances = {
+            name: float(np.var([row[name] for row in metric_rows], ddof=0))
+            for name in METRIC_NAMES
+        }
         updated_lines.append(f'[AVG]   {format_metric_summary(overall_means)}')
+        updated_lines.append(f'[VAR]   {format_metric_summary(overall_variances)}')
 
     report_file.write_text('\n'.join(updated_lines), encoding='utf-8')
 
@@ -161,19 +166,23 @@ class Metrics:
 
 def evaluate(args, recons_key):
     metrics = Metrics(METRIC_FUNCS)
+    target_files = sorted(
+        (path for path in args.target_path.iterdir() if path.suffix == '.h5'),
+        key=lambda path: path.name,
+    )
 
-    for tgt_file in args.target_path.iterdir():
-        if tgt_file.suffix != '.h5':
-            continue
+    for tgt_file in tqdm(
+        target_files,
+        desc=f'Eval {args.acc_factor}',
+        unit='file',
+        dynamic_ncols=True,
+    ):
         with h5py.File(tgt_file) as target, h5py.File(
           args.predictions_path / tgt_file.name) as recons:
             target = target[recons_key]
             target = np.array(target)
             recons = recons['reconstruction']
             recons = np.transpose(recons,[1,2,0])
-            print(tgt_file)
-            print (target.shape,recons.shape)
-            print (type(target),type(recons))
             metrics.push(target, recons)
             
     return metrics
@@ -209,3 +218,11 @@ if __name__ == '__main__':
             f.write(metrics_report)
     else:
         write_aggregated_report(report_file, args.acc_factor, metrics_report)
+
+    print(f'[{args.acc_factor}]   {metrics_report}')
+
+    if args.report_file_acc_factor is None:
+        means = metrics.means()
+        variances = {name: 0.0 for name in METRIC_NAMES}
+        print(f'[AVG]   {format_metric_summary(means)}')
+        print(f'[VAR]   {format_metric_summary(variances)}')

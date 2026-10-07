@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+set -e
+
 # TRAIN_ACC_FACTORS must match the training/validation run directory.
 # All ACC_FACTORS are aggregated into one report file with an [AVG] row.
 MODEL='fastmritest'
@@ -27,5 +29,8 @@ for ACC_FACTOR in ${ACC_FACTORS}; do
     --dataset-type "${DATASET_TYPE}"
 done
 
+REPORT_FILE="${RUN_DIR}/report_${DATASET_TYPE}_${MASK_TYPE}_${REPORT_FILE_ACC_FACTOR}.txt"
+printf '\nFinal aggregated results:\n'
+grep -E '^\[(AVG|VAR)\]' "${REPORT_FILE}"
 
 
