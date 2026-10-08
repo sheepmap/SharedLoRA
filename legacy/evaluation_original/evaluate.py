@@ -72,12 +72,6 @@ def format_metric_summary(means, stddevs=None):
     )
 
 
-def format_metric_variances(variances):
-    return ' '.join(
-        f'{name} = {variances[name]:.4g}' for name in METRIC_NAMES
-    )
-
-
 def parse_metric_means(report_line):
     means = {}
     number_pattern = r'([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)'
@@ -91,11 +85,8 @@ def parse_metric_means(report_line):
     return means
 
 
-def write_aggregated_report(report_file, acc_factor, metrics_report, variances):
+def write_aggregated_report(report_file, acc_factor, metrics_report):
     current_line = f'[{acc_factor}]   {metrics_report}'
-    current_variance_line = (
-        f'[VAR][{acc_factor}]   {format_metric_variances(variances)}'
-    )
     report_lines = []
 
     if report_file.exists():
@@ -105,21 +96,23 @@ def write_aggregated_report(report_file, acc_factor, metrics_report, variances):
         ]
 
     updated_lines = []
+    replaced_current = False
+
     for line in report_lines:
-        if line.startswith('[AVG]') or line.startswith('[VAR]   '):
+        if line.startswith('[AVG]') or line.startswith('[VAR]'):
             continue
-        if line.startswith(f'[{acc_factor}]') or line.startswith(
-            f'[VAR][{acc_factor}]'
-        ):
+        if line.startswith(f'[{acc_factor}]'):
+            if not replaced_current:
+                updated_lines.append(current_line)
+                replaced_current = True
             continue
         updated_lines.append(line)
 
-    updated_lines.extend((current_line, current_variance_line))
+    if not replaced_current:
+        updated_lines.append(current_line)
 
     metric_rows = []
     for line in updated_lines:
-        if line.startswith('[VAR]') or line.startswith('[AVG]'):
-            continue
         parsed_means = parse_metric_means(line)
         if parsed_means is not None:
             metric_rows.append(parsed_means)
@@ -129,7 +122,12 @@ def write_aggregated_report(report_file, acc_factor, metrics_report, variances):
             name: float(np.mean([row[name] for row in metric_rows]))
             for name in METRIC_NAMES
         }
+        overall_variances = {
+            name: float(np.var([row[name] for row in metric_rows], ddof=0))
+            for name in METRIC_NAMES
+        }
         updated_lines.append(f'[AVG]   {format_metric_summary(overall_means)}')
+        updated_lines.append(f'[VAR]   {format_metric_summary(overall_variances)}')
 
     report_file.write_text('\n'.join(updated_lines), encoding='utf-8')
 
@@ -143,13 +141,10 @@ class Metrics:
         self.metrics = {
             metric: Statistics() for metric in metric_funcs
         }
-        self.values = {metric: [] for metric in metric_funcs}
 
     def push(self, target, recons):
         for metric, func in METRIC_FUNCS.items():
-            value = func(target, recons)
-            self.metrics[metric].push(value)
-            self.values[metric].append(value)
+            self.metrics[metric].push(func(target, recons))
 
     def means(self):
         return {
@@ -158,14 +153,7 @@ class Metrics:
 
     def stddevs(self):
         return {
-            metric: float(np.std(values, ddof=0))
-            for metric, values in self.values.items()
-        }
-
-    def variances(self):
-        return {
-            metric: float(np.var(values, ddof=0))
-            for metric, values in self.values.items()
+            metric: stat.stddev() for metric, stat in self.metrics.items()
         }
 
     def get_report(self):
@@ -218,7 +206,6 @@ if __name__ == '__main__':
     recons_key = 'volfs'
     metrics = evaluate(args, recons_key)
     metrics_report = metrics.get_report()
-    variances = metrics.variances()
 
     report_acc_factor = args.report_file_acc_factor or args.acc_factor
     report_file = args.report_path / 'report_{}_{}_{}.txt'.format(
@@ -228,17 +215,14 @@ if __name__ == '__main__':
 
     if args.report_file_acc_factor is None:
         with open(report_file, 'w', encoding='utf-8') as f:
-            f.write(
-                f'[{args.acc_factor}]   {metrics_report}\n'
-                f'[VAR][{args.acc_factor}]   {format_metric_variances(variances)}\n'
-            )
+            f.write(metrics_report)
     else:
-        write_aggregated_report(
-            report_file, args.acc_factor, metrics_report, variances
-        )
+        write_aggregated_report(report_file, args.acc_factor, metrics_report)
 
     print(f'[{args.acc_factor}]   {metrics_report}')
 
-    print(f'[VAR][{args.acc_factor}]   {format_metric_variances(variances)}')
     if args.report_file_acc_factor is None:
-        print(f'[AVG]   {format_metric_summary(metrics.means())}')
+        means = metrics.means()
+        variances = {name: 0.0 for name in METRIC_NAMES}
+        print(f'[AVG]   {format_metric_summary(means)}')
+        print(f'[VAR]   {format_metric_summary(variances)}')

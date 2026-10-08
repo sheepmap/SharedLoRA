@@ -11,14 +11,14 @@ MASK_TYPE='gaussian'
 # Exact directory token created by the training run, including commas.
 TRAIN_ACC_FACTORS='2x,8x,10x'
 # Individual factors to validate; use space-separated values for the loop.
-ACC_FACTORS='2x 4x 8x 10x'
+ACC_FACTORS='1x 2x 4x 8x 10x' #推理所采用的采样率，这里以加速因子的形式输入，可以换算为采样率，1x对应全采样，2x对应50%，4x对应25%，以此类推。当前设置的范围在10%到100
 MASK_GROUP='seed45'
 BATCH_SIZE=1
 DEVICE='cuda:0'
 # Must match the training entrypoint's PEFT_METHOD. The adapter subdirectory
 # below is generated from this value and the same rank/target/gate rules used
 # by train_keyrount_lora.py; do not type the long adapter path manually.
-PEFT_METHOD='shared_lora'
+PEFT_METHOD='melora'
 MELORA_TARGET='down_sample_layers.0,up_sample_layers.0.layers,up_sample_layers.1.layers,up_sample_layers.2.layers'
 DORA_RANK=8
 DORA_ALPHA=16
